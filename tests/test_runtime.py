@@ -10,6 +10,7 @@ from guardian_agent.runtime import (
     kill_switch,
     list_queued_tasks,
     release_lock,
+    recover_interrupted_tasks,
     update_task_state,
 )
 
@@ -59,6 +60,19 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(res["status"], "emergency_stop_triggered")
         queued = list_queued_tasks(self.brain)
         self.assertTrue(all(t["state"] in {"cancelled", "stopped"} for t in queued))
+
+    def test_recovery_requires_review_for_side_effect_task(self) -> None:
+        safe = enqueue_task(self.brain, task_type="coding", summary="Local work")
+        external = enqueue_task(self.brain, task_type="browser", summary="Submit form")
+        update_task_state(self.brain, safe["id"], "running")
+        update_task_state(self.brain, external["id"], "running")
+        tasks = list_queued_tasks(self.brain)
+        next(task for task in tasks if task["id"] == external["id"])["external_side_effect"] = True
+        from guardian_agent.runtime import _save_queue
+        _save_queue(self.brain, tasks)
+        recover_interrupted_tasks(self.brain)
+        self.assertEqual(get_task_status(self.brain, safe["id"])["state"], "queued")
+        self.assertEqual(get_task_status(self.brain, external["id"])["state"], "awaiting_approval")
 
 
 if __name__ == "__main__":

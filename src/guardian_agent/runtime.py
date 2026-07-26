@@ -12,6 +12,23 @@ from pathlib import Path
 from guardian_agent.core import GuardianError, ProjectBrain, append_journey, now_utc, markdown_escape
 
 
+VALID_STATES = {
+    "draft", "awaiting_confirmation", "queued", "running", "awaiting_approval",
+    "blocked", "failed", "cancelled", "completed",
+}
+ALLOWED_TRANSITIONS = {
+    "draft": {"awaiting_confirmation", "queued", "cancelled"},
+    "awaiting_confirmation": {"queued", "cancelled"},
+    "queued": {"running", "awaiting_approval", "cancelled", "blocked"},
+    "running": {"awaiting_approval", "blocked", "failed", "cancelled", "completed", "queued"},
+    "awaiting_approval": {"queued", "cancelled", "blocked"},
+    "blocked": {"queued", "cancelled"},
+    "failed": {"queued", "cancelled"},
+    "cancelled": set(),
+    "completed": set(),
+}
+
+
 def tasks_dir(brain: ProjectBrain) -> Path:
     d = brain.directory / "tasks"
     d.mkdir(exist_ok=True)
@@ -79,10 +96,42 @@ def update_task_state(brain: ProjectBrain, task_id: str, new_state: str) -> dict
     task = next((t for t in tasks if t["id"] == task_id), None)
     if not task:
         raise GuardianError(f"Task {task_id!r} not found in queue.")
-    task["state"] = markdown_escape(new_state)
+    state = markdown_escape(new_state)
+    if state not in VALID_STATES:
+        raise GuardianError(f"Invalid task state {state!r}.")
+    previous = task["state"]
+    if state != previous and state not in ALLOWED_TRANSITIONS.get(previous, set()):
+        raise GuardianError(f"Task {task_id!r} cannot transition from {previous!r} to {state!r}.")
+    task["state"] = state
     task["updated_at"] = now_utc()
     _save_queue(brain, tasks)
     return task
+
+
+def recover_interrupted_tasks(brain: ProjectBrain) -> list[dict]:
+    """Safely recover crash-interrupted work without executing it automatically.
+
+    A previous running task is returned to ``queued`` only when it is safe to
+    retry. Tasks that may have caused an external side effect wait for a human
+    approval/review instead.
+    """
+    tasks = _load_queue(brain)
+    recovered: list[dict] = []
+    for task in tasks:
+        if task.get("state") != "running":
+            continue
+        if task.get("external_side_effect", False):
+            task["state"] = "awaiting_approval"
+            task["recovery_reason"] = "Interrupted during potential external side effect; review required."
+        else:
+            task["state"] = "queued"
+            task["recovery_reason"] = "Recovered after an interrupted local task."
+        task["updated_at"] = now_utc()
+        recovered.append(task)
+    if recovered:
+        _save_queue(brain, tasks)
+        append_journey(brain, "Task Recovery Performed", [f"Recovered {len(recovered)} interrupted task(s)."])
+    return recovered
 
 
 def get_task_status(brain: ProjectBrain, task_id: str) -> dict:

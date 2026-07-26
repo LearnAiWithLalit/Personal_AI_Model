@@ -513,7 +513,7 @@ Provider discovery must use official websites, documentation, APIs, model regist
 - Capability, context limit, modality, tool support, price/quota, and provider status.
 - Validation result, expiry/recheck date, and risk classification.
 
-Hardcoded free model names are only development fixtures, never production discovery.
+Hardcoded free model names are only development fixtures, never production discovery. The current `provider discover-free` command installs labelled development seeds; it must be replaced by verified catalog adapters before a production release.
 
 ### 21.2 Health and routing
 
@@ -708,3 +708,23 @@ The system is not production-ready until it can demonstrate all of the following
 - Create, test, promote, disable, and roll back a skill with full provenance.
 - Prove token/cost savings and task-quality gains on the evaluation suite.
 - Let a separate user install the product and use only their own accounts, providers, browser profiles, and project memory.
+
+## 30. Implementation Status — 2026-07-26
+
+### Implemented foundation
+
+- Local project brain with requirements, confirmation, decisions, lessons, journey records, and compact handoff exports.
+- Provider registry and low-cost routing; provider calls now resolve an environment or `vault://` credential only at request time.
+- Authenticated encrypted local vault using a passphrase-derived Fernet key. Legacy obfuscated vault records are read only for one-time migration.
+- Skill draft/promotion records, specialist-role handoff packages, task queue, locks, crash recovery, and emergency stop.
+- Approval queue with exact action/target, one-time approval consumption, coding verification without a shell, and sandbox-copy rollback support.
+- Browser inspection plus bounded Playwright navigate/click/fill/screenshot/submit actions. Submission is visible by default and policy-gated.
+
+### Still required before production readiness
+
+- Verified live provider catalog/discovery, quota/budget enforcement, streaming/failover, and real provider quality evaluation.
+- OS-keychain integrations, profile/account registry, full browser session persistence/manual takeover, and duplicate-submission recovery.
+- Research citations and prompt-injection defenses; trusted skill signing/provenance and a real evaluator/promotion workflow.
+- Proper git worktree isolation, review/commit/PR adapters, background scheduler/worker daemon, and structured telemetry/incident tooling.
+- Official or authorized connectors for VS Code, Antigravity, Claude Code, Canva, Adobe, Lovable, and any other subscription service.
+- Multi-user isolation, installer/release flow, end-to-end evaluation suite, and production security review.

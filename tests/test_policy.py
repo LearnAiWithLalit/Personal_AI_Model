@@ -5,6 +5,7 @@ from pathlib import Path
 from guardian_agent.core import initialize
 from guardian_agent.policy import (
     approve_action_request,
+    consume_action_approval,
     check_policy_permission,
     get_policy,
     load_approval_queue,
@@ -47,6 +48,8 @@ class PolicyEngineTests(unittest.TestCase):
 
         approved = approve_action_request(self.brain, req["id"])
         self.assertEqual(approved["status"], "approved")
+        consumed = consume_action_approval(self.brain, req["id"], "delete_file", "important.db")
+        self.assertEqual(consumed["status"], "consumed")
 
 
 if __name__ == "__main__":

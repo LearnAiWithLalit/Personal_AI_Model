@@ -7,6 +7,7 @@ environment variable, OS keychain, or encrypted vault.
 from __future__ import annotations
 
 import json
+import os
 import urllib.request
 import urllib.error
 from dataclasses import asdict, dataclass
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from guardian_agent.core import GuardianError, ProjectBrain, append_journey, now_utc, markdown_escape
 from guardian_agent.health import record_provider_error, record_provider_success
+from guardian_agent.vault import get_secret, redact_secrets
 
 
 GATEWAY_FILE = "model-gateway.json"
@@ -150,8 +152,8 @@ def add_provider(
     return next(provider for provider in list_providers(brain) if provider.id == provider_id)
 
 
-def discover_free_providers(brain: ProjectBrain) -> list[dict]:
-    """Discover and register legitimate free-tier endpoints (OpenRouter free models, OmniRoute local)."""
+def install_development_provider_seeds(brain: ProjectBrain) -> list[dict]:
+    """Install clearly-labelled development seeds; this does not verify live availability."""
     free_models = [
         {
             "provider_id": "openrouter-free-llama",
@@ -200,8 +202,13 @@ def discover_free_providers(brain: ProjectBrain) -> list[dict]:
         )
         added.append({"id": prov.id, "model": item["model_id"]})
         
-    append_journey(brain, "Free API Providers Discovered", [f"Added {len(added)} free-tier model routes."])
+    append_journey(brain, "Development Provider Seeds Installed", [f"Added {len(added)} unverified development routes."])
     return added
+
+
+# Compatibility alias for the initial CLI.  It deliberately no longer claims
+# that hard-coded model names are live provider discovery.
+discover_free_providers = install_development_provider_seeds
 
 
 def setup_ollama_provider(brain: ProjectBrain, model_name: str = "qwen2.5-coder") -> dict:
@@ -287,7 +294,15 @@ def complete_task_with_model(
     if base_url:
         try:
             url = f"{base_url.rstrip('/')}/chat/completions"
-            headers = {"Content-Type": "application/json"}
+            headers = {"Content-Type": "application/json", "User-Agent": "Guardian-Agent/0.1"}
+            credential_ref = route.get("credential_env")
+            if credential_ref:
+                secret = get_secret(brain, credential_ref)
+                if not secret:
+                    raise GuardianError(
+                        f"Provider {provider_id!r} requires credential {credential_ref!r}, but it is not available."
+                    )
+                headers["Authorization"] = f"Bearer {secret}"
             payload_data = {
                 "model": model_id,
                 "messages": [
@@ -304,8 +319,9 @@ def complete_task_with_model(
                 record_telemetry(brain, task, provider_id, model_id, tokens=len(prompt.split()), cost_usd=0.0)
                 return {"task": task, "provider": provider_id, "model": model_id, "response": text}
         except Exception as error:
-            record_provider_error(brain, provider_id, str(error))
-            raise GuardianError(f"Provider {provider_id!r} completion failed: {error}") from error
+            safe_error = redact_secrets(brain, str(error))
+            record_provider_error(brain, provider_id, safe_error)
+            raise GuardianError(f"Provider {provider_id!r} completion failed: {safe_error}") from error
 
     raise GuardianError(f"Provider {provider_id!r} has no valid base_url configured for completion.")
 

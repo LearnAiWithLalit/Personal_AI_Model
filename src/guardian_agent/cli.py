@@ -32,10 +32,10 @@ from guardian_agent.operator import audit_log_action
 from guardian_agent.creative import list_creative_artifacts, record_creative_artifact
 from guardian_agent.workers import dispatch_worker, list_worker_roles
 from guardian_agent.export import export_handoff
-from guardian_agent.browser_operator import inspect_web_page
+from guardian_agent.browser_operator import execute_browser_action, inspect_web_page
 
 # Phase G0 Imports
-from guardian_agent.runtime import enqueue_task, get_task_status, kill_switch, list_queued_tasks
+from guardian_agent.runtime import enqueue_task, get_task_status, kill_switch, list_queued_tasks, recover_interrupted_tasks
 from guardian_agent.policy import check_policy_permission, get_policy, load_approval_queue, request_action_approval, approve_action_request
 from guardian_agent.vault import get_secret, has_secret, store_secret
 from guardian_agent.sandbox import create_worktree_sandbox, generate_diff_preview, rollback_sandbox
@@ -111,6 +111,8 @@ def build_parser() -> argparse.ArgumentParser:
     r_lst.add_argument("--project", default=".", type=_project_path)
     r_kill = runtime_sub.add_parser("kill", help="Trigger emergency stop switch")
     r_kill.add_argument("--project", default=".", type=_project_path)
+    r_recover = runtime_sub.add_parser("recover", help="Recover interrupted tasks without executing them")
+    r_recover.add_argument("--project", default=".", type=_project_path)
 
     # Phase G0: Policy
     pol_p = subparsers.add_parser("policy", help="Policy-as-code and approval queue")
@@ -167,6 +169,14 @@ def build_parser() -> argparse.ArgumentParser:
     b_test = browser_sub.add_parser("test", help="Inspect web page with Playwright/HTTP fallback")
     b_test.add_argument("--project", default=".", type=_project_path)
     b_test.add_argument("--url", required=True)
+    b_action = browser_sub.add_parser("action", help="Run one policy-gated visible browser action")
+    b_action.add_argument("--project", default=".", type=_project_path)
+    b_action.add_argument("--url", required=True)
+    b_action.add_argument("--action", choices=["navigate", "click", "fill", "screenshot", "submit"], required=True)
+    b_action.add_argument("--selector")
+    b_action.add_argument("--value")
+    b_action.add_argument("--approval-id", help="One approved request ID, required for sensitive actions such as submit")
+    b_action.add_argument("--headless", action="store_true", help="Run hidden; visible browser is the default")
 
     # Run completion
     run_parser = subparsers.add_parser("run", help="Execute task completion using routed model")
@@ -281,6 +291,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(list_queued_tasks(brain), indent=2))
             elif args.runtime_command == "kill":
                 print(json.dumps(kill_switch(brain), indent=2))
+            elif args.runtime_command == "recover":
+                print(json.dumps(recover_interrupted_tasks(brain), indent=2))
             return 0
 
         if args.command == "policy":
@@ -318,6 +330,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "browser":
             if args.browser_command == "test":
                 print(json.dumps(inspect_web_page(brain, args.url), indent=2))
+            elif args.browser_command == "action":
+                print(json.dumps(execute_browser_action(
+                    brain, url=args.url, action=args.action, selector=args.selector,
+                    value=args.value, visible=not args.headless, approval_id=args.approval_id,
+                ), indent=2))
             return 0
 
         if args.command == "run":

@@ -9,6 +9,7 @@ description = "Local-first project brain and workflow foundation for Guardian Ag
 requires-python = ">=3.11"
 readme = "README.md"
 license = {text = "MIT"}
+dependencies = ["cryptography>=41"]
 
 [project.scripts]
 guardian = "guardian_agent.cli:main"
@@ -18,4 +19,3 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

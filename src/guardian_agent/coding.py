@@ -7,6 +7,7 @@ and automated outcome recording into Project Brain records.
 from __future__ import annotations
 
 import subprocess
+import shlex
 from pathlib import Path
 from guardian_agent.core import GuardianError, ProjectBrain, append_journey, record_lesson, now_utc, markdown_escape
 
@@ -33,9 +34,12 @@ def run_verification(root_path: Path, test_command: str) -> dict:
         return {"success": True, "exit_code": 0, "stdout": "No verification command supplied", "stderr": ""}
         
     try:
+        command = shlex.split(test_command)
+        if not command:
+            return {"success": True, "exit_code": 0, "stdout": "No verification command supplied", "stderr": ""}
         process = subprocess.run(
-            test_command,
-            shell=True,
+            command,
+            shell=False,
             cwd=str(root_path.resolve()),
             capture_output=True,
             text=True,

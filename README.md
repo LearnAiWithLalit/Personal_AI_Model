@@ -1,7 +1,3 @@
-<<<<<<< HEAD
-# Personal_AI_Model
-Personal_AI_Model
-=======
 # Guardian Agent — Persistent Project Brain & Model Router
 
 **Guardian Agent** is a local-first, persistent project brain and secret-free model gateway. It manages projects from requirement discovery through delivery, preserving requirements, decisions, plans, development journeys, and skills.
@@ -64,7 +60,8 @@ guardian provider add \
   --cost-tier local \
   --base-url http://localhost:11434/v1
 
-# Auto-discover legitimate free-tier API endpoints (OpenRouter / OmniRoute)
+# Install optional, unverified development seeds (OpenRouter / local OmniRoute).
+# This is not live provider discovery; validate each provider before use.
 guardian provider discover-free
 
 # Setup local Ollama provider endpoint
@@ -92,7 +89,7 @@ guardian export --target claude
 
 ## 🧪 Running Tests
 
-Run the full unit test suite (31 tests across 10 modules):
+Run the full unit test suite:
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -102,5 +99,19 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 ## 🔒 Security Boundary
 
-The `.agent/` project brain contains **only human-readable Markdown project records**. Credentials are strictly referenced via environment variables or `vault://` secret references, ensuring API keys, passwords, and tokens are **never** logged to disk or Git repositories.
->>>>>>> e049323 (Initial release of Guardian — Local-first Persistent Project Brain & Model Gateway)
+The `.agent/` project brain contains **only human-readable Markdown project records**. Credentials are referenced via environment variables or `vault://` secret references, ensuring API keys, passwords, and tokens are never included in plans, journey logs, or handoff packages.
+
+For the encrypted local vault, set a passphrase in the current shell before storing or reading secrets. The passphrase itself is never saved by Guardian:
+
+```bash
+export GUARDIAN_VAULT_PASSPHRASE='use-a-unique-long-passphrase'
+guardian vault store --key OPENROUTER_API_KEY --value '...'
+```
+
+The passphrase is required again after a restart. Existing legacy vault files are migrated when a secret is next stored.
+
+## Current implementation boundary
+
+The repository is a working local foundation, not yet a finished universal autonomous agent. It includes durable project memory, compact handoff exports, provider routing, authenticated provider calls, encrypted local secret storage, task recovery, approvals, code verification, and bounded browser actions.
+
+It deliberately does not bypass CAPTCHA/MFA, identity checks, payments, legal acceptance, or provider limits. Real Canva, Adobe, Lovable, VS Code, and Antigravity integrations still need their official connector/API or an authenticated user-visible browser session.

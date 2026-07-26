@@ -30,6 +30,10 @@ def default_policy() -> dict:
                 "delete_file",
                 "irreversible_git_push",
                 "create_external_account",
+                "browser_submit",
+                "accept_legal_terms",
+                "identity_verification",
+                "captcha_or_mfa_bypass",
             ],
         },
     }
@@ -124,3 +128,24 @@ def approve_action_request(brain: ProjectBrain, request_id: str) -> dict:
             
     append_journey(brain, f"Action Approved: {req['action']}", [f"Request ID: {request_id}"])
     return req
+
+
+def consume_action_approval(brain: ProjectBrain, request_id: str, action: str, target: str) -> dict:
+    """Consume one approved request for its exact action and target."""
+    entries = load_approval_queue(brain)
+    request = next((entry for entry in entries if entry["id"] == request_id), None)
+    if not request:
+        raise GuardianError(f"Approval request {request_id!r} not found.")
+    clean_action = markdown_escape(action)
+    clean_target = markdown_escape(target)
+    if request.get("status") != "approved":
+        raise GuardianError(f"Approval request {request_id!r} is not approved.")
+    if request.get("action") != clean_action or request.get("target") != clean_target:
+        raise GuardianError("Approval request does not match this action and target.")
+    request["status"] = "consumed"
+    request["consumed_at"] = now_utc()
+    with approval_queue_path(brain).open("w", encoding="utf-8") as handle:
+        for entry in entries:
+            handle.write(json.dumps(entry) + "\n")
+    append_journey(brain, f"Approval Consumed: {clean_action}", [f"Request ID: {request_id}"])
+    return request

@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from guardian_agent.core import GuardianError, initialize
@@ -80,6 +81,24 @@ class ModelGatewayTests(unittest.TestCase):
         )
         with self.assertRaises(GuardianError):
             complete_task_with_model(self.brain, task="coding", prompt="Write a function")
+
+    @patch("guardian_agent.gateway.urllib.request.urlopen")
+    def test_completion_uses_configured_environment_credential(self, urlopen) -> None:
+        import os
+        os.environ["TEST_GATEWAY_KEY"] = "test-secret-token"
+        self.addCleanup(os.environ.pop, "TEST_GATEWAY_KEY", None)
+        add_provider(
+            self.brain, provider_id="authenticated", kind="openai-compatible", model_id="model",
+            capabilities=["coding"], cost_tier="local", priority=1,
+            base_url="https://example.invalid/v1", credential_env="TEST_GATEWAY_KEY",
+        )
+        response = unittest.mock.MagicMock()
+        response.read.return_value = b'{"choices":[{"message":{"content":"done"}}]}'
+        urlopen.return_value.__enter__.return_value = response
+        result = complete_task_with_model(self.brain, "coding", "hello")
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-secret-token")
+        self.assertEqual(result["response"], "done")
 
 
 if __name__ == "__main__":

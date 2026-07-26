@@ -2,8 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from guardian_agent.browser_operator import check_playwright_available, inspect_web_page
-from guardian_agent.core import initialize
+from guardian_agent.browser_operator import check_playwright_available, execute_browser_action, inspect_web_page
+from guardian_agent.core import GuardianError, initialize
 
 
 class BrowserOperatorTests(unittest.TestCase):
@@ -24,6 +24,12 @@ class BrowserOperatorTests(unittest.TestCase):
         self.assertIn("status", res)
         self.assertIn("method", res)
         self.assertTrue(res["status"] in {"success", "fallback_http", "failed"})
+
+    def test_submit_requires_approval_before_browser_is_opened(self) -> None:
+        with self.assertRaises(GuardianError):
+            execute_browser_action(
+                self.brain, url="https://example.invalid", action="submit", selector="button[type=submit]"
+            )
 
 
 if __name__ == "__main__":
