@@ -2,8 +2,8 @@
 
 Provides a standard unified contract for subscription connectors (Canva, Adobe, Lovable),
 capability discovery, user-controlled authentication via vault, typed approval classification,
-atomic idempotency ledger reservation, audit receipts, export path traversal validation,
-ConnectorNotConfigured guards, and dev mock isolation guards.
+atomic idempotency ledger reservation with owner tokens, unknown-outcome reconciliation, audit receipts,
+export path traversal validation, ConnectorNotConfigured guards, and dev mock isolation guards.
 """
 
 from __future__ import annotations
@@ -77,16 +77,16 @@ def _validate_export_path(brain: ProjectBrain, connector_name: str, asset_id: st
 
     try:
         if not out_file.is_relative_to(export_dir):
-            raise GuardianError(f"Security violation: export path escaped target directory.")
+            raise GuardianError("Security violation: export path escaped target directory.")
     except AttributeError:
         if os.path.commonpath([str(out_file), str(export_dir)]) != str(export_dir):
-            raise GuardianError(f"Security violation: export path escaped target directory.")
+            raise GuardianError("Security violation: export path escaped target directory.")
 
     return out_file
 
 
 class IdempotencyLedger:
-    """Durable ledger tracking connector operations with single atomic reservation, completion, and failure transactions."""
+    """Durable ledger tracking connector operations with single atomic reservation, owner token verification, and outcome reconciliation."""
 
     @staticmethod
     def _ledger_path(brain: ProjectBrain) -> Path:
@@ -111,7 +111,14 @@ class IdempotencyLedger:
             return {}
 
     @classmethod
-    def reserve(cls, brain: ProjectBrain, composite_key: str, payload_hash: str, ttl_seconds: int = 300) -> dict[str, Any] | None:
+    def reserve(
+        cls,
+        brain: ProjectBrain,
+        composite_key: str,
+        payload_hash: str,
+        ttl_seconds: int = 300,
+        owner_token: str | None = None,
+    ) -> dict[str, Any]:
         """Atomically check and reserve an operation key before side effect execution."""
         lock_p = cls._lock_path(brain)
         with open(lock_p, "a", encoding="utf-8") as lock_fd:
@@ -119,35 +126,80 @@ class IdempotencyLedger:
             try:
                 ledger = cls.load(brain)
                 entry = ledger.get(composite_key)
+                now_ts = time.time()
+
                 if entry:
                     st = entry.get("status")
                     if st == "completed":
-                        return entry.get("receipt")
-                    if st == "reserved" and time.time() - float(entry.get("reserved_timestamp", 0)) < ttl_seconds:
-                        raise GuardianError(f"Idempotent operation {composite_key!r} is currently locked and running in another process.")
+                        return {"already_completed": True, "receipt": entry.get("receipt")}
 
+                    if st == "unknown_outcome":
+                        raise GuardianError(
+                            f"Idempotent operation {composite_key!r} is in 'unknown_outcome' state from a previous interruption. "
+                            "Explicit reconciliation via reconcile_connector_outcome() is required before retrying."
+                        )
+
+                    if st == "reserved":
+                        stored_token = entry.get("owner_token")
+                        reserved_ts = float(entry.get("reserved_timestamp", 0))
+                        elapsed = now_ts - reserved_ts
+
+                        if elapsed < ttl_seconds:
+                            if owner_token and stored_token == owner_token:
+                                return {"already_completed": False, "owner_token": stored_token, "re_reserved": True}
+                            raise GuardianError(
+                                f"Idempotent operation {composite_key!r} is currently locked and running under another owner token."
+                            )
+                        else:
+                            # Stale TTL expired: transition to unknown_outcome fail-closed
+                            entry["status"] = "unknown_outcome"
+                            entry["error_reason"] = "Stale reservation TTL expired without completion or release"
+                            entry["updated_at"] = now_utc()
+                            ledger[composite_key] = entry
+                            cls._save_under_lock(brain, ledger)
+                            raise GuardianError(
+                                f"Idempotent operation {composite_key!r} reservation expired (TTL {ttl_seconds}s) and was marked 'unknown_outcome'. "
+                                "Explicit reconciliation is required before retrying."
+                            )
+
+                token = f"otok-{uuid.uuid4().hex[:12]}"
                 ledger[composite_key] = {
                     "status": "reserved",
                     "payload_hash": payload_hash,
+                    "owner_token": token,
                     "reserved_at": now_utc(),
-                    "reserved_timestamp": time.time(),
+                    "reserved_timestamp": now_ts,
                 }
                 cls._save_under_lock(brain, ledger)
-                return None
+                return {"already_completed": False, "owner_token": token}
             finally:
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
 
     @classmethod
-    def complete(cls, brain: ProjectBrain, composite_key: str, receipt: dict[str, Any]) -> None:
-        """Atomically record successful operation completion and receipt."""
+    def complete(cls, brain: ProjectBrain, composite_key: str, receipt: dict[str, Any], owner_token: str) -> None:
+        """Atomically record successful operation completion requiring matching owner_token."""
+        if not owner_token:
+            raise GuardianError("Security violation: owner_token is required to complete a connector operation.")
+
         lock_p = cls._lock_path(brain)
         with open(lock_p, "a", encoding="utf-8") as lock_fd:
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
             try:
                 ledger = cls.load(brain)
+                entry = ledger.get(composite_key)
+                if not entry:
+                    raise GuardianError(f"Idempotent operation {composite_key!r} not found in ledger.")
+
+                stored_token = entry.get("owner_token")
+                if stored_token and stored_token != owner_token:
+                    raise GuardianError(
+                        f"Security violation: owner token mismatch for operation {composite_key!r}. Completion denied."
+                    )
+
                 ledger[composite_key] = {
                     "status": "completed",
                     "completed_at": now_utc(),
+                    "owner_token": stored_token,
                     "receipt": receipt,
                 }
                 cls._save_under_lock(brain, ledger)
@@ -155,19 +207,76 @@ class IdempotencyLedger:
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
 
     @classmethod
-    def mark_unknown(cls, brain: ProjectBrain, composite_key: str, error_reason: str) -> None:
-        """Atomically record unknown_outcome for an interrupted operation."""
+    def mark_unknown(cls, brain: ProjectBrain, composite_key: str, error_reason: str, owner_token: str | None = None) -> None:
+        """Atomically record unknown_outcome for an interrupted operation requiring matching owner_token if reserved."""
         lock_p = cls._lock_path(brain)
         with open(lock_p, "a", encoding="utf-8") as lock_fd:
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
             try:
                 ledger = cls.load(brain)
+                entry = ledger.get(composite_key, {})
+                if entry.get("status") == "reserved":
+                    stored_token = entry.get("owner_token")
+                    if owner_token and stored_token and stored_token != owner_token:
+                        raise GuardianError(f"Security violation: owner token mismatch for operation {composite_key!r}.")
+
                 ledger[composite_key] = {
                     "status": "unknown_outcome",
                     "error_reason": error_reason,
+                    "owner_token": entry.get("owner_token"),
                     "updated_at": now_utc(),
                 }
                 cls._save_under_lock(brain, ledger)
+            finally:
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+
+    @classmethod
+    def reconcile(
+        cls,
+        brain: ProjectBrain,
+        composite_key: str,
+        resolution: str,
+        resolution_reason: str,
+        receipt: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Safely reconcile an operation in 'unknown_outcome' state."""
+        clean_res = str(resolution or "").lower().strip()
+        if clean_res not in ("completed", "failed", "cancelled"):
+            raise GuardianError(f"Invalid reconciliation resolution {resolution!r}. Allowed: completed, failed, cancelled.")
+
+        lock_p = cls._lock_path(brain)
+        with open(lock_p, "a", encoding="utf-8") as lock_fd:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+            try:
+                ledger = cls.load(brain)
+                entry = ledger.get(composite_key)
+                if not entry:
+                    raise GuardianError(f"Idempotent operation {composite_key!r} not found in ledger.")
+
+                if entry.get("status") not in ("unknown_outcome", "reserved"):
+                    raise GuardianError(
+                        f"Operation {composite_key!r} is in status {entry.get('status')!r}, not 'unknown_outcome'. "
+                        "Reconciliation is only allowed for interrupted or stale operations."
+                    )
+
+                if clean_res == "completed":
+                    final_receipt = receipt or {
+                        "status": "reconciled_completed",
+                        "idempotency_key": composite_key,
+                        "reconciled_at": now_utc(),
+                        "reason": resolution_reason,
+                    }
+                    entry["status"] = "completed"
+                    entry["completed_at"] = now_utc()
+                    entry["receipt"] = final_receipt
+                    entry["reconciliation_reason"] = resolution_reason
+                else:
+                    del ledger[composite_key]
+                    cls._save_under_lock(brain, ledger)
+                    return {"composite_key": composite_key, "status": clean_res, "reconciled": True}
+
+                cls._save_under_lock(brain, ledger)
+                return entry
             finally:
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
 
@@ -179,6 +288,59 @@ class IdempotencyLedger:
             json.dump(data, fh, indent=2)
             fh.write("\n")
         tmp.replace(p)
+
+
+def reserve_connector_operation(
+    brain: ProjectBrain,
+    connector_name: str,
+    action: str,
+    idempotency_key: str,
+    payload_hash: str = "",
+    ttl_seconds: int = 300,
+) -> dict[str, Any]:
+    """Top-level helper to reserve a connector operation in the idempotency ledger."""
+    comp_key = f"{connector_name}:{action}:{idempotency_key}"
+    return IdempotencyLedger.reserve(brain, comp_key, payload_hash or idempotency_key, ttl_seconds=ttl_seconds)
+
+
+def complete_connector_operation(
+    brain: ProjectBrain,
+    connector_name: str,
+    action: str,
+    idempotency_key: str,
+    receipt: dict[str, Any],
+    owner_token: str,
+) -> None:
+    """Top-level helper to complete a connector operation requiring matching owner token."""
+    comp_key = f"{connector_name}:{action}:{idempotency_key}"
+    IdempotencyLedger.complete(brain, comp_key, receipt, owner_token=owner_token)
+
+
+def fail_connector_operation(
+    brain: ProjectBrain,
+    connector_name: str,
+    action: str,
+    idempotency_key: str,
+    error_reason: str,
+    owner_token: str | None = None,
+) -> None:
+    """Top-level helper to mark a connector operation as unknown_outcome."""
+    comp_key = f"{connector_name}:{action}:{idempotency_key}"
+    IdempotencyLedger.mark_unknown(brain, comp_key, error_reason, owner_token=owner_token)
+
+
+def reconcile_connector_outcome(
+    brain: ProjectBrain,
+    connector_name: str,
+    action: str,
+    idempotency_key: str,
+    resolution: str,
+    resolution_reason: str,
+    receipt: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Top-level helper to reconcile an operation in unknown_outcome state."""
+    comp_key = f"{connector_name}:{action}:{idempotency_key}"
+    return IdempotencyLedger.reconcile(brain, comp_key, resolution, resolution_reason, receipt=receipt)
 
 
 class BaseConnector(ABC):
@@ -224,19 +386,19 @@ class BaseConnector(ABC):
         export_format: str = "png",
         allow_mock: bool = False,
     ) -> dict[str, Any]:
-        """Export asset to local artifact directory with audit receipt."""
+        """Export asset to local artifact file with traversal protection."""
 
     @abstractmethod
     def classify_approval(self, action_type: str) -> str:
-        """Return 'permitted' or 'requires_approval' for a given action."""
+        """Return 'permitted' or 'requires_approval' for the requested action."""
 
     @abstractmethod
     def revoke_session(self, brain: ProjectBrain) -> dict[str, Any]:
-        """Revoke active connector session."""
+        """Revoke persistent account session."""
 
 
 class CanvaConnector(BaseConnector):
-    """Canva Subscription Connector (Foundation & Mock Scaffolding)."""
+    """Canva Design Connector (Foundation & Mock Scaffolding)."""
 
     def __init__(self, account_id: str) -> None:
         super().__init__("canva", account_id)
@@ -246,7 +408,7 @@ class CanvaConnector(BaseConnector):
         return {
             "connector": self.connector_name,
             "account_id": self.account_id,
-            "status": "mock",
+            "status": "not_configured",
             "capabilities": ["list_designs", "create_design", "export_png", "export_pdf", "browser_fallback"],
             "allowed_domains": acc.get("allowed_domains", ["canva.com"]),
             "api_ready": False,
@@ -259,7 +421,7 @@ class CanvaConnector(BaseConnector):
         return {
             "connector": self.connector_name,
             "account_id": self.account_id,
-            "authenticated": False,  # False until real remote authentication succeeds
+            "authenticated": False,
             "credential_available": bool(secret),
             "remote_authenticated": False,
             "status": "credential_available" if secret else "authentication_required",
@@ -315,9 +477,11 @@ class CanvaConnector(BaseConnector):
         composite_key = f"key-{hashlib.sha256(composite_raw.encode('utf-8')).hexdigest()[:24]}"
         payload_hash = hashlib.sha256(composite_raw.encode("utf-8")).hexdigest()
 
-        cached_receipt = IdempotencyLedger.reserve(brain, composite_key, payload_hash)
-        if cached_receipt:
-            return cached_receipt
+        res_info = IdempotencyLedger.reserve(brain, composite_key, payload_hash)
+        if res_info.get("already_completed"):
+            return res_info["receipt"]
+
+        owner_token = res_info["owner_token"]
 
         try:
             with ProfileLockManager(brain, self.account_id):
@@ -332,11 +496,11 @@ class CanvaConnector(BaseConnector):
                     "idempotency_key": composite_key,
                     "created_at": now_utc(),
                 }
-                IdempotencyLedger.complete(brain, composite_key, receipt)
+                IdempotencyLedger.complete(brain, composite_key, receipt, owner_token=owner_token)
                 append_journey(brain, f"Canva Asset Created: {asset_id}", [f"Title: {title}"])
                 return receipt
         except Exception as exc:
-            IdempotencyLedger.mark_unknown(brain, composite_key, str(exc))
+            IdempotencyLedger.mark_unknown(brain, composite_key, str(exc), owner_token=owner_token)
             raise
 
     def export_asset(

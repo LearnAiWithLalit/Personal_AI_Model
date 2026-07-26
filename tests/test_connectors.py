@@ -2,11 +2,19 @@
 
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from guardian_agent.accounts import register_account
-from guardian_agent.connectors import get_connector
+from guardian_agent.connectors import (
+    IdempotencyLedger,
+    complete_connector_operation,
+    fail_connector_operation,
+    get_connector,
+    reconcile_connector_outcome,
+    reserve_connector_operation,
+)
 from guardian_agent.core import GuardianError, initialize
 
 
@@ -81,6 +89,88 @@ class TestConnectors(unittest.TestCase):
                     conn.authenticate(brain)
             finally:
                 os.environ.pop("CANVA_KEY2", None)
+
+    def test_idempotency_owner_token_completion_enforcement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = initialize(Path(tmp) / "demo", "Idempotency Test", "Phase 5 test")
+            res = reserve_connector_operation(brain, "canva", "create_asset", "idem-key-100", ttl_seconds=300)
+            self.assertFalse(res["already_completed"])
+            token = res["owner_token"]
+            self.assertTrue(token.startswith("otok-"))
+
+            # Completion with wrong owner token must be rejected
+            with self.assertRaises(GuardianError) as cm1:
+                complete_connector_operation(
+                    brain, "canva", "create_asset", "idem-key-100", {"status": "ok"}, owner_token="wrong_token"
+                )
+            self.assertIn("owner token mismatch", str(cm1.exception))
+
+            # Completion without owner token must be rejected
+            with self.assertRaises(GuardianError) as cm2:
+                complete_connector_operation(
+                    brain, "canva", "create_asset", "idem-key-100", {"status": "ok"}, owner_token=""
+                )
+            self.assertIn("owner_token is required", str(cm2.exception))
+
+            # Completion with valid owner token must succeed
+            complete_connector_operation(
+                brain, "canva", "create_asset", "idem-key-100", {"status": "ok", "asset_id": "a-100"}, owner_token=token
+            )
+
+            # Re-reserving completed operation returns receipt
+            res2 = reserve_connector_operation(brain, "canva", "create_asset", "idem-key-100")
+            self.assertTrue(res2["already_completed"])
+            self.assertEqual(res2["receipt"]["asset_id"], "a-100")
+
+    def test_idempotency_stale_ttl_expiration_transitions_to_unknown_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = initialize(Path(tmp) / "demo", "Idempotency Test", "Phase 5 test")
+            comp_key = "canva:create_asset:idem-key-200"
+
+            # Manually inject a stale reservation entry with timestamp in the past
+            ledger = IdempotencyLedger.load(brain)
+            ledger[comp_key] = {
+                "status": "reserved",
+                "payload_hash": "hash123",
+                "owner_token": "otok-old",
+                "reserved_at": "2026-01-01 00:00 UTC",
+                "reserved_timestamp": time.time() - 400,  # Expired (400s > 300s TTL)
+            }
+            IdempotencyLedger._save_under_lock(brain, ledger)
+
+            # Attempting to reserve an expired stale operation must transition to unknown_outcome and fail closed
+            with self.assertRaises(GuardianError) as cm:
+                reserve_connector_operation(brain, "canva", "create_asset", "idem-key-200", ttl_seconds=300)
+            self.assertIn("reservation expired", str(cm.exception))
+
+            # Verify ledger state is now unknown_outcome
+            fresh_ledger = IdempotencyLedger.load(brain)
+            self.assertEqual(fresh_ledger[comp_key]["status"], "unknown_outcome")
+            self.assertIn("Stale reservation TTL expired", fresh_ledger[comp_key]["error_reason"])
+
+    def test_idempotency_unknown_outcome_reconciliation_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = initialize(Path(tmp) / "demo", "Idempotency Test", "Phase 5 test")
+
+            # Reserve and mark unknown
+            res = reserve_connector_operation(brain, "canva", "create_asset", "idem-key-300")
+            token = res["owner_token"]
+            fail_connector_operation(brain, "canva", "create_asset", "idem-key-300", "Network drop", owner_token=token)
+
+            # Retry is blocked while in unknown_outcome
+            with self.assertRaises(GuardianError) as cm:
+                reserve_connector_operation(brain, "canva", "create_asset", "idem-key-300")
+            self.assertIn("unknown_outcome", str(cm.exception))
+
+            # Reconcile as cancelled (allowing retry)
+            rec_res = reconcile_connector_outcome(
+                brain, "canva", "create_asset", "idem-key-300", resolution="cancelled", resolution_reason="Verified not created on Canva"
+            )
+            self.assertTrue(rec_res["reconciled"])
+
+            # Retry now succeeds after reconciliation
+            res2 = reserve_connector_operation(brain, "canva", "create_asset", "idem-key-300")
+            self.assertFalse(res2["already_completed"])
 
 
 if __name__ == "__main__":
