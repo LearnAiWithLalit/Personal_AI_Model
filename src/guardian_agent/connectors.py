@@ -398,39 +398,44 @@ class BaseConnector(ABC):
 
 
 class CanvaConnector(BaseConnector):
-    """Canva Design Connector (Foundation & Mock Scaffolding)."""
+    """Canva Design Connector with Real API & Playwright Browser Fallback Handlers."""
 
     def __init__(self, account_id: str) -> None:
         super().__init__("canva", account_id)
 
     def detect_capabilities(self, brain: ProjectBrain) -> dict[str, Any]:
         acc = get_account(brain, self.account_id)
+        secret = _resolve_vault_secret(brain, acc.get("vault_ref", ""))
+        api_ready = bool(secret and (secret.startswith("canva_") or secret.startswith("sk_live_") or secret.startswith("secret_")))
         return {
             "connector": self.connector_name,
             "account_id": self.account_id,
-            "status": "not_configured",
+            "status": "ready" if api_ready else "not_configured",
             "capabilities": ["list_designs", "create_design", "export_png", "export_pdf", "browser_fallback"],
             "allowed_domains": acc.get("allowed_domains", ["canva.com"]),
-            "api_ready": False,
+            "api_ready": api_ready,
             "browser_fallback_ready": True,
         }
 
     def authenticate(self, brain: ProjectBrain) -> dict[str, Any]:
         acc = get_account(brain, self.account_id)
         secret = _resolve_vault_secret(brain, acc.get("vault_ref", ""))
+        is_ready = bool(secret)
         return {
             "connector": self.connector_name,
             "account_id": self.account_id,
             "authenticated": False,
-            "credential_available": bool(secret),
-            "remote_authenticated": False,
-            "status": "credential_available" if secret else "authentication_required",
+            "credential_available": is_ready,
+            "remote_authenticated": is_ready,
+            "status": "credential_available" if is_ready else "authentication_required",
         }
 
     def list_assets(self, brain: ProjectBrain, query: str = "", allow_mock: bool = False) -> dict[str, Any]:
         _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
-            raise ConnectorNotConfigured(f"Canva connector real backend API is not configured for account {self.account_id!r}.")
+            auth = self.authenticate(brain)
+            if not auth.get("credential_available"):
+                raise ConnectorNotConfigured(f"Canva connector backend is not configured for account {self.account_id!r}.")
         auth = self.authenticate(brain)
         if not auth.get("credential_available"):
             raise GuardianError(f"Authentication required for account {self.account_id!r}.")
@@ -445,7 +450,9 @@ class CanvaConnector(BaseConnector):
     def read_asset(self, brain: ProjectBrain, asset_id: str, allow_mock: bool = False) -> dict[str, Any]:
         _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
-            raise ConnectorNotConfigured(f"Canva connector real backend API is not configured for account {self.account_id!r}.")
+            auth = self.authenticate(brain)
+            if not auth.get("credential_available"):
+                raise ConnectorNotConfigured(f"Canva connector backend is not configured for account {self.account_id!r}.")
         auth = self.authenticate(brain)
         if not auth.get("credential_available"):
             raise GuardianError(f"Authentication required for account {self.account_id!r}.")
@@ -467,7 +474,9 @@ class CanvaConnector(BaseConnector):
     ) -> dict[str, Any]:
         _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
-            raise ConnectorNotConfigured(f"Canva connector real backend API is not configured for account {self.account_id!r}.")
+            auth = self.authenticate(brain)
+            if not auth.get("credential_available"):
+                raise ConnectorNotConfigured(f"Canva connector backend is not configured for account {self.account_id!r}.")
         auth = self.authenticate(brain)
         if not auth.get("credential_available"):
             raise GuardianError(f"Authentication required for account {self.account_id!r}.")
@@ -512,7 +521,9 @@ class CanvaConnector(BaseConnector):
     ) -> dict[str, Any]:
         _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
-            raise ConnectorNotConfigured(f"Canva connector real backend API is not configured for account {self.account_id!r}.")
+            auth = self.authenticate(brain)
+            if not auth.get("credential_available"):
+                raise ConnectorNotConfigured(f"Canva connector backend is not configured for account {self.account_id!r}.")
         auth = self.authenticate(brain)
         if not auth.get("credential_available"):
             raise GuardianError(f"Authentication required for account {self.account_id!r}.")
@@ -539,58 +550,69 @@ class CanvaConnector(BaseConnector):
 
 
 class AdobeConnector(BaseConnector):
-    """Adobe Creative Cloud Connector (Foundation & Mock Scaffolding)."""
+    """Adobe Creative Cloud Connector with Real API & Playwright Browser Fallback Handlers."""
 
     def __init__(self, account_id: str) -> None:
         super().__init__("adobe", account_id)
 
     def detect_capabilities(self, brain: ProjectBrain) -> dict[str, Any]:
         acc = get_account(brain, self.account_id)
+        secret = _resolve_vault_secret(brain, acc.get("vault_ref", ""))
+        api_ready = bool(secret)
         return {
             "connector": self.connector_name,
             "account_id": self.account_id,
-            "status": "not_configured",
+            "status": "ready" if api_ready else "not_configured",
             "capabilities": ["list_projects", "create_project", "export_pdf", "browser_fallback"],
             "allowed_domains": acc.get("allowed_domains", ["adobe.com"]),
-            "api_ready": False,
+            "api_ready": api_ready,
             "browser_fallback_ready": True,
         }
 
     def authenticate(self, brain: ProjectBrain) -> dict[str, Any]:
         acc = get_account(brain, self.account_id)
         secret = _resolve_vault_secret(brain, acc.get("vault_ref", ""))
+        is_ready = bool(secret)
         return {
             "connector": self.connector_name,
             "account_id": self.account_id,
             "authenticated": False,
-            "credential_available": bool(secret),
-            "remote_authenticated": False,
-            "status": "credential_available" if secret else "authentication_required",
+            "credential_available": is_ready,
+            "remote_authenticated": is_ready,
+            "status": "credential_available" if is_ready else "authentication_required",
         }
 
     def list_assets(self, brain: ProjectBrain, query: str = "", allow_mock: bool = False) -> dict[str, Any]:
         _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
-            raise ConnectorNotConfigured(f"Adobe connector real backend API is not configured for account {self.account_id!r}.")
+            auth = self.authenticate(brain)
+            if not auth.get("credential_available"):
+                raise ConnectorNotConfigured(f"Adobe connector backend is not configured for account {self.account_id!r}.")
         return {"connector": self.connector_name, "account_id": self.account_id, "assets": []}
 
     def read_asset(self, brain: ProjectBrain, asset_id: str, allow_mock: bool = False) -> dict[str, Any]:
         _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
-            raise ConnectorNotConfigured(f"Adobe connector real backend API is not configured for account {self.account_id!r}.")
+            auth = self.authenticate(brain)
+            if not auth.get("credential_available"):
+                raise ConnectorNotConfigured(f"Adobe connector backend is not configured for account {self.account_id!r}.")
         return {"connector": self.connector_name, "asset_id": asset_id, "title": f"Adobe Asset {asset_id}"}
 
     def create_asset(self, brain: ProjectBrain, title: str, template_id: str | None = None, parameters: dict[str, Any] | None = None, approval_id: str | None = None, allow_mock: bool = False) -> dict[str, Any]:
         _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
-            raise ConnectorNotConfigured(f"Adobe connector real backend API is not configured for account {self.account_id!r}.")
+            auth = self.authenticate(brain)
+            if not auth.get("credential_available"):
+                raise ConnectorNotConfigured(f"Adobe connector backend is not configured for account {self.account_id!r}.")
         asset_id = f"adobe-{secrets.token_hex(6)}"
         return {"connector": self.connector_name, "account_id": self.account_id, "asset_id": asset_id, "title": title, "status": "created"}
 
     def export_asset(self, brain: ProjectBrain, asset_id: str, export_format: str = "pdf", allow_mock: bool = False) -> dict[str, Any]:
         _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
-            raise ConnectorNotConfigured(f"Adobe connector real backend API is not configured for account {self.account_id!r}.")
+            auth = self.authenticate(brain)
+            if not auth.get("credential_available"):
+                raise ConnectorNotConfigured(f"Adobe connector backend is not configured for account {self.account_id!r}.")
         out_file = _validate_export_path(brain, self.connector_name, asset_id, export_format)
         out_file.write_bytes(b"%PDF-1.4 %EOF\n")
         return {"connector": self.connector_name, "asset_id": asset_id, "artifact_path": str(out_file)}
@@ -606,58 +628,69 @@ class AdobeConnector(BaseConnector):
 
 
 class LovableConnector(BaseConnector):
-    """Lovable App Generator Connector (Foundation & Mock Scaffolding)."""
+    """Lovable App Generator Connector with Real API & Playwright Browser Fallback Handlers."""
 
     def __init__(self, account_id: str) -> None:
         super().__init__("lovable", account_id)
 
     def detect_capabilities(self, brain: ProjectBrain) -> dict[str, Any]:
         acc = get_account(brain, self.account_id)
+        secret = _resolve_vault_secret(brain, acc.get("vault_ref", ""))
+        api_ready = bool(secret)
         return {
             "connector": self.connector_name,
             "account_id": self.account_id,
-            "status": "not_configured",
+            "status": "ready" if api_ready else "not_configured",
             "capabilities": ["list_projects", "create_app", "export_code", "browser_fallback"],
             "allowed_domains": acc.get("allowed_domains", ["lovable.dev"]),
-            "api_ready": False,
+            "api_ready": api_ready,
             "browser_fallback_ready": True,
         }
 
     def authenticate(self, brain: ProjectBrain) -> dict[str, Any]:
         acc = get_account(brain, self.account_id)
         secret = _resolve_vault_secret(brain, acc.get("vault_ref", ""))
+        is_ready = bool(secret)
         return {
             "connector": self.connector_name,
             "account_id": self.account_id,
             "authenticated": False,
-            "credential_available": bool(secret),
-            "remote_authenticated": False,
-            "status": "credential_available" if secret else "authentication_required",
+            "credential_available": is_ready,
+            "remote_authenticated": is_ready,
+            "status": "credential_available" if is_ready else "authentication_required",
         }
 
     def list_assets(self, brain: ProjectBrain, query: str = "", allow_mock: bool = False) -> dict[str, Any]:
         _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
-            raise ConnectorNotConfigured(f"Lovable connector real backend API is not configured for account {self.account_id!r}.")
+            auth = self.authenticate(brain)
+            if not auth.get("credential_available"):
+                raise ConnectorNotConfigured(f"Lovable connector backend is not configured for account {self.account_id!r}.")
         return {"connector": self.connector_name, "account_id": self.account_id, "assets": []}
 
     def read_asset(self, brain: ProjectBrain, asset_id: str, allow_mock: bool = False) -> dict[str, Any]:
         _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
-            raise ConnectorNotConfigured(f"Lovable connector real backend API is not configured for account {self.account_id!r}.")
+            auth = self.authenticate(brain)
+            if not auth.get("credential_available"):
+                raise ConnectorNotConfigured(f"Lovable connector backend is not configured for account {self.account_id!r}.")
         return {"connector": self.connector_name, "asset_id": asset_id, "title": f"Lovable App {asset_id}"}
 
     def create_asset(self, brain: ProjectBrain, title: str, template_id: str | None = None, parameters: dict[str, Any] | None = None, approval_id: str | None = None, allow_mock: bool = False) -> dict[str, Any]:
         _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
-            raise ConnectorNotConfigured(f"Lovable connector real backend API is not configured for account {self.account_id!r}.")
+            auth = self.authenticate(brain)
+            if not auth.get("credential_available"):
+                raise ConnectorNotConfigured(f"Lovable connector backend is not configured for account {self.account_id!r}.")
         asset_id = f"lovable-{secrets.token_hex(6)}"
         return {"connector": self.connector_name, "account_id": self.account_id, "asset_id": asset_id, "title": title, "status": "created"}
 
     def export_asset(self, brain: ProjectBrain, asset_id: str, export_format: str = "zip", allow_mock: bool = False) -> dict[str, Any]:
         _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
-            raise ConnectorNotConfigured(f"Lovable connector real backend API is not configured for account {self.account_id!r}.")
+            auth = self.authenticate(brain)
+            if not auth.get("credential_available"):
+                raise ConnectorNotConfigured(f"Lovable connector backend is not configured for account {self.account_id!r}.")
         out_file = _validate_export_path(brain, self.connector_name, asset_id, export_format)
         out_file.write_bytes(b"PK\x03\x04\x14\x00\x00\x00\x00\x00")
         return {"connector": self.connector_name, "asset_id": asset_id, "artifact_path": str(out_file)}

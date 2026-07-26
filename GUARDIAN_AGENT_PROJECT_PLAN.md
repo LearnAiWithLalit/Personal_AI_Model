@@ -711,9 +711,9 @@ The system is not production-ready until it can demonstrate all of the following
 
 ## 30. Free-Resource Operating Plan
 
-Guardian must minimize primary-model usage by treating Ollama, OmniRoute, and
-FreeBuff as complementary resources rather than three interchangeable chat
-interfaces.
+Guardian must minimize primary-model usage by treating Ollama, OmniRoute,
+FreeBuff, and optional coding harnesses such as JCode as complementary
+resources rather than interchangeable chat interfaces.
 
 ### 30.1 Routing order
 
@@ -722,7 +722,7 @@ User request
   -> Guardian deterministic intake, risk, profiles, skills, memory retrieval
   -> user confirms the exact orchestration ID
   -> Ollama for private analysis, summaries, repository maps, and first drafts
-  -> FreeBuff for a bounded coding package when repository edits are needed
+  -> FreeBuff or JCode for a bounded coding package when repository edits are needed
   -> OmniRoute only for a missing specialty, failed/weak local result, or independent review
   -> primary Codex/Claude/Gemini reviews compact evidence and gives the final green signal
 ```
@@ -738,12 +738,17 @@ User request
    Do not send `.env`, vault data, credentials, account identifiers, raw logs,
    or unrelated files. Use one continuing FreeBuff session per task where
    possible; do not evade its daily/session limits.
-4. **OmniRoute for specialist fallback and review.** Choose a healthy,
+4. **JCode as an optional bounded coding/swarm worker.** Use it only after
+   capability discovery and explicit local configuration. Guardian supplies
+   the compact task, exact writable paths, verification commands, worker/time
+   limits, and provider budget. Guardian retains policy, approval, memory
+   governance, final verification, and the final green signal.
+5. **OmniRoute for specialist fallback and review.** Choose a healthy,
    capability-matched free-limited combo only when Ollama is insufficient.
    Use redacted log health, quota/capacity evidence, provider diversity, and a
    maximum of five attempts. Never call all combos merely to obtain more
    opinions. Keep the GPT-5.5 combo last as the final-review reserve.
-5. **Primary model as authority.** Codex, Claude, Gemini, or another user-chosen
+6. **Primary model as authority.** Codex, Claude, Gemini, or another user-chosen
    primary model reviews the compact requirement, patch/diff, test evidence,
    unresolved risks, and conflicting worker findings. It handles high-risk
    judgment and gives the final green signal; it should not repeat successful
@@ -775,6 +780,7 @@ User request
 | Guardian | Intake, confirmation, policy, memory, routing, budgets, recovery, compact handoffs | Spend a model call on deterministic work |
 | Ollama | Private/local reasoning, summaries, triage, first drafts, lightweight review | Decide external approvals or final high-risk acceptance |
 | FreeBuff | Confirmed bounded repository implementation and focused tests | Receive secrets/unrelated files, commit, push, or perform unapproved external actions |
+| JCode (optional) | Bounded coding sessions, persistent worker sessions, compact repository inspection, and Guardian-limited swarms | Replace Guardian policy, import credentials automatically, enter self-development mode, spawn unbounded workers, or perform external actions directly |
 | OmniRoute | Capability fallback, diverse second opinion, difficult specialist work, reserved final review | Fan out to every combo or bypass model/member policy |
 | Primary model | Resolve ambiguity/conflicts, inspect evidence, high-risk review, final green signal | Re-read the entire journey or redo verified routine work |
 
@@ -789,6 +795,50 @@ User request
   model's compact final review.
 - Persist the result, mistakes, and reusable prevention lesson so the next
   project begins with the improved routing decision.
+
+### 30.5 Planned JCode integration
+
+JCode is an MIT-licensed coding-agent harness and may be integrated as an
+optional replaceable worker, never as Guardian's policy authority or mandatory
+runtime dependency. Reference:
+[1jehuang/jcode](https://github.com/1jehuang/jcode).
+
+The first integration milestone is a `JCodeAdapter` with:
+
+- Binary/version detection and capability discovery without a model call.
+- Dry-run-by-default compact handoff containing only the confirmed task,
+  acceptance criteria, selected files, exact writable paths, and test command.
+- Sandboxed worktree execution, timeouts, cancellation, bounded concurrency,
+  structured result capture, and diff/artifact validation.
+- Optional persistent-session reuse and a Guardian-controlled swarm limit.
+- Local/Ollama or explicitly user-authorized provider selection; no automatic
+  credential scanning, importing, account switching, or quota evasion.
+- Telemetry disabled by default (`JCODE_NO_TELEMETRY=1`) for Guardian-launched
+  sessions, with any opt-in recorded as an explicit user setting.
+- JCode self-development disabled. JCode workers may not modify Guardian,
+  its policy, project brain, vault, approval records, or worker configuration.
+- Browser tooling treated as an untrusted execution backend behind Guardian's
+  URL policy, account scope, one-time approvals, idempotency, evidence, and
+  manual-takeover controls.
+- Primary-model review of the compact diff, tests, risks, and worker evidence
+  before completion.
+
+Useful JCode design ideas to implement independently in Guardian:
+
+- Semantic local memory retrieval with project/session/global scope,
+  provenance, correction/negative memories, confidence decay, and conflict or
+  supersession handling.
+- Lazy skill/profile injection so only relevant instructions consume context.
+- Structure-aware repository search and adaptive output truncation.
+- Persistent worker sessions, crash recovery, inter-worker change
+  notifications, and bounded messaging.
+
+**Done when:** Guardian can dispatch one confirmed coding task to JCode with no
+secrets or unrelated context, constrain all writes, cancel/recover it, collect
+structured evidence, reject an out-of-scope change, and obtain final
+primary-model approval. Tests must also prove that telemetry, self-development,
+automatic credential import, unbounded swarm spawning, and direct external
+actions remain disabled.
 
 ## 31. Implementation Status — 2026-07-26
 
@@ -837,5 +887,6 @@ User request
 - OS-keychain integrations, profile/account registry, full browser session persistence/manual takeover, and duplicate-submission recovery.
 - Cryptographic signing for trusted skills, isolated forward-testing on real tasks, and calibrated multi-model semantic evaluation.
 - Review/commit/PR adapters, an always-on scheduler/worker service, and structured telemetry/incident tooling.
+- Optional hardened JCode adapter, semantic lazy-skill retrieval, and structure-aware compact repository search.
 - Official or authorized connectors for VS Code, Antigravity, Claude Code, Canva, Adobe, Lovable, and any other subscription service.
 - Multi-user isolation, installer/release flow, end-to-end evaluation suite, and production security review.
