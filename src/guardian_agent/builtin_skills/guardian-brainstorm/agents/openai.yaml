@@ -1,0 +1,4 @@
+interface:
+  display_name: "Guardian Brainstorm"
+  short_description: "Clarify intent and approve a scoped design"
+  default_prompt: "Use $guardian-brainstorm to clarify this request and produce an approved design."

@@ -51,5 +51,7 @@ def dispatch_worker(
         "role": clean_role,
         "task": clean_task,
         "status": "dispatched",
+        "context_mode": "fresh_bounded_handoff",
+        "review_required": ["specification", "quality"],
         "package_path": pkg["saved_path"],
     }

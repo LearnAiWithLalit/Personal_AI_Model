@@ -45,5 +45,16 @@ class CLITests(unittest.TestCase):
         self.assertEqual(code_dispatch, 0)
 
 
+    def test_cli_service_commands(self) -> None:
+        code_status = main(["service", "status", "--project", str(self.root)])
+        self.assertEqual(code_status, 0)
+
+        code_config = main(["service", "config", "--project", str(self.root), "--system", "systemd"])
+        self.assertEqual(code_config, 0)
+
+        code_backup = main(["service", "backup", "--project", str(self.root)])
+        self.assertEqual(code_backup, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

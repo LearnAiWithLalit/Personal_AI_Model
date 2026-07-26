@@ -1,0 +1,4 @@
+interface:
+  display_name: "Guardian Verify"
+  short_description: "Require fresh evidence before completion"
+  default_prompt: "Use $guardian-verify to gather fresh evidence before claiming completion."

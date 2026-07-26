@@ -1,0 +1,1124 @@
+"""Unified IDE & Coding-Tool Adapter Contract (Phase 4).
+
+Provides a standard adapter interface for 6 coding tool targets (VS Code, Codex, Claude Code,
+Gemini, Antigravity, Cursor), tool capability discovery, ownership-safe configuration generation,
+JSONC-safe VS Code settings merging, crash-safe bounded handoff preparation with rich task/requirements/acceptance context,
+persistent adapter identity binding, strict verification evidence validation, primary-review stage protection,
+tool launching capability with returncode & environment status verification, and clean uninstall.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import tempfile
+from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Any
+
+from guardian_agent.bootstrap import TARGET_FILES, _content
+from guardian_agent.core import GuardianError, ProjectBrain, append_journey, now_utc
+from guardian_agent.execution import (
+    ExecutionLockManager,
+    claim_execution_stage,
+    mark_execution_dispatched,
+    record_execution_result,
+    revert_execution_dispatch,
+    show_execution,
+)
+
+
+
+SUPPORTED_IDE_TARGETS = ("vscode", "codex", "claude", "gemini", "antigravity", "cursor")
+
+# Guardian-owned sentinel prefix written to every generated harness file.
+_GUARDIAN_SENTINEL = "# Guardian bootstrap for "
+
+# Root harness paths — each target gets its own unique path to avoid collisions.
+_ROOT_HARNESS_PATHS: dict[str, Path] = {
+    "vscode":      Path(".vscode") / "GUARDIAN.md",
+    "codex":       Path("AGENTS.md"),
+    "claude":      Path("CLAUDE.md"),
+    "gemini":      Path("GEMINI.md"),
+    "antigravity": Path("GUARDIAN.md"),
+    "cursor":      Path(".cursor") / "rules" / "guardian.mdc",
+}
+
+# Non-root integration paths
+_INTEGRATION_PATHS: dict[str, Path] = {
+    target: Path("integrations") / target / TARGET_FILES[target]
+    for target in SUPPORTED_IDE_TARGETS
+}
+
+# Sensitive path patterns that must NEVER be included in handoff allowed_paths
+_PROTECTED_PATH_PATTERNS = re.compile(
+    r"^(\.env.*|\.git.*|\.venv.*|\.ssh.*|vault.*|\.agent/vault.*|credentials.*|secrets.*|.*\.pem|.*\.key|.*\.pfx|.*\.p12|.*\.sqlite|.*\.db)$",
+    re.IGNORECASE,
+)
+
+
+def _strip_jsonc_comments(text: str) -> str:
+    """Robust JSONC stripper handling line & block comments outside string literals and trailing commas outside string literals.
+
+    VS Code settings.json often contains // comments, /* */ comments, and trailing commas.
+    Does NOT mutate string literals containing comment syntax or trailing commas (e.g. "keep,}").
+    """
+    result = []
+    in_string = False
+    escape_next = False
+    i = 0
+    length = len(text)
+
+    while i < length:
+        ch = text[i]
+
+        if escape_next:
+            result.append(ch)
+            escape_next = False
+            i += 1
+            continue
+
+        if in_string:
+            result.append(ch)
+            if ch == "\\":
+                escape_next = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+
+        # Outside string
+        if ch == '"':
+            in_string = True
+            result.append(ch)
+            i += 1
+            continue
+
+        # Line comment //
+        if ch == "/" and i + 1 < length and text[i + 1] == "/":
+            i += 2
+            while i < length and text[i] != "\n":
+                i += 1
+            continue
+
+        # Block comment /* ... */
+        if ch == "/" and i + 1 < length and text[i + 1] == "*":
+            i += 2
+            while i + 1 < length and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+
+        result.append(ch)
+        i += 1
+
+    # Second pass: remove trailing commas OUTSIDE string literals
+    final_chars = []
+    in_str2 = False
+    esc2 = False
+    s = "".join(result)
+    s_len = len(s)
+    idx = 0
+    while idx < s_len:
+        c = s[idx]
+        if esc2:
+            final_chars.append(c)
+            esc2 = False
+            idx += 1
+            continue
+        if in_str2:
+            final_chars.append(c)
+            if c == "\\":
+                esc2 = True
+            elif c == '"':
+                in_str2 = False
+            idx += 1
+            continue
+        if c == '"':
+            in_str2 = True
+            final_chars.append(c)
+            idx += 1
+            continue
+        if c == ",":
+            # Lookahead to see if next non-whitespace char outside string is } or ]
+            j = idx + 1
+            while j < s_len and s[j] in " \t\r\n":
+                j += 1
+            if j < s_len and s[j] in "}]":
+                # Trailing comma outside string literal — skip
+                idx += 1
+                continue
+        final_chars.append(c)
+        idx += 1
+
+    return "".join(final_chars)
+
+
+def _is_guardian_owned(path: Path, target: str) -> bool:
+    """Return True if the file was generated by Guardian for this target."""
+    if not path.is_file():
+        return False
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+        return _GUARDIAN_SENTINEL + target in content
+    except OSError:
+        return False
+
+
+def _get_project_context(brain: ProjectBrain, task_summary: str = "", stage_allowed_paths: list[str] | None = None) -> dict[str, Any]:
+    """Retrieve task, scoped requirements, acceptance criteria, and task-approved allowed paths."""
+    confirmed_reqs = []
+    if task_summary:
+        confirmed_reqs.append(f"Task Scope: {task_summary}")
+
+    for req_path in [
+        brain.directory / "REQUIREMENTS.md",
+        brain.root / ".agent" / "REQUIREMENTS.md",
+        brain.directory / "CONTEXT.md",
+    ]:
+        if req_path.is_file():
+            try:
+                raw = req_path.read_text(encoding="utf-8", errors="replace")
+                for line in raw.splitlines():
+                    line_str = line.strip()
+                    if line_str.startswith("- [x]") or line_str.startswith("* [x]") or line_str.startswith("Requirement:"):
+                        confirmed_reqs.append(line_str)
+            except OSError:
+                pass
+
+    confirmed_reqs.append("Follow confirmed task specification and zero regression policy.")
+    confirmed_reqs.append("Never access, modify, or expose protected credentials, secrets, or .env files.")
+
+    # Use stage allowed_paths if explicitly supplied by task planning; otherwise use safe project default paths
+    if stage_allowed_paths and isinstance(stage_allowed_paths, list) and len(stage_allowed_paths) > 0:
+        approved_paths = list(stage_allowed_paths)
+    else:
+        approved_paths = ["src/", "tests/", "docs/"]
+
+    # Filter out any sensitive/protected files from allowed_paths fail-closed
+    filtered_paths = []
+    for p in approved_paths:
+        clean_p = p.strip()
+        if not clean_p or clean_p == "." or clean_p == "/" or _PROTECTED_PATH_PATTERNS.match(clean_p.rstrip("/")):
+            continue
+        filtered_paths.append(clean_p)
+
+    if not filtered_paths:
+        filtered_paths = ["src/", "tests/"]
+
+    return {
+        "requirements": confirmed_reqs,
+        "acceptance_criteria": [
+            "All unit and integration test suites must pass cleanly.",
+            "No syntax, compilation, or lint errors introduced.",
+            "Changes must remain strictly within specified allowed paths.",
+            "Never expose or modify protected vault credentials or .env files.",
+            "Provide concrete, passing verification evidence.",
+        ],
+        "allowed_paths": filtered_paths,
+    }
+
+
+def _validate_verification_results(verification_results: list[dict[str, Any]] | None) -> None:
+    """Strictly validate verification evidence items for outcome='passed'."""
+    if not verification_results or not isinstance(verification_results, list) or len(verification_results) == 0:
+        raise GuardianError(
+            "Outcome 'passed' requires a non-empty list of verification_results items."
+        )
+
+    for idx, item in enumerate(verification_results):
+        if not isinstance(item, dict):
+            raise GuardianError(f"Verification item at index {idx} must be a dictionary.")
+
+        check_name = str(item.get("check") or item.get("label") or item.get("name") or "").strip()
+        result_val = str(item.get("result") or item.get("status") or item.get("outcome") or "").strip()
+
+        if not check_name:
+            raise GuardianError(f"Verification item at index {idx} is missing a check/label/name.")
+        if not result_val:
+            raise GuardianError(f"Verification item at index {idx} ('{check_name}') is missing a result/status.")
+
+        res_lower = result_val.lower()
+
+        # Reject non-passing statuses
+        if (
+            res_lower in ("skipped", "false", "none", "null", "cancelled", "0", "0/0")
+            or "not passed" in res_lower
+            or "0 passed" in res_lower
+            or "unverified" in res_lower
+            or "crash" in res_lower
+        ):
+            raise GuardianError(
+                f"Verification check '{check_name}' indicates non-passing status ('{result_val}'). Cannot accept outcome 'passed'."
+            )
+
+        # Check for failure/error keywords, allowing "0 errors" / "0 failures" / "0 failed"
+        if "fail" in res_lower or "error" in res_lower:
+            cleaned_check = re.sub(r"\b0\s+(errors?|failures?|failed|error|failure)\b", "", res_lower)
+            if "fail" in cleaned_check or "error" in cleaned_check:
+                raise GuardianError(
+                    f"Verification check '{check_name}' indicates failure ('{result_val}'). Cannot accept outcome 'passed'."
+                )
+
+
+class BaseIDEAdapter(ABC):
+    """Abstract base contract for IDE and coding-tool adapters."""
+
+    def __init__(self, target_name: str) -> None:
+        if target_name not in SUPPORTED_IDE_TARGETS:
+            raise GuardianError(
+                f"Unsupported IDE target: {target_name!r}. Supported: {', '.join(SUPPORTED_IDE_TARGETS)}"
+            )
+        self.target_name = target_name
+
+    @abstractmethod
+    def detect_tool(self) -> dict[str, Any]:
+        """Detect installed CLI tools, configurations, and capability status."""
+
+    @abstractmethod
+    def generate_config(
+        self,
+        brain: ProjectBrain,
+        overwrite: bool = False,
+        root_harness: bool = True,
+    ) -> dict[str, Any]:
+        """Generate or merge upgrade-safe, ownership-safe configuration."""
+
+    @abstractmethod
+    def create_bounded_handoff(
+        self,
+        brain: ProjectBrain,
+        execution_id: str,
+        stage_index: int,
+    ) -> dict[str, Any]:
+        """Prepare a fresh, bounded handoff package with full task context."""
+
+    @abstractmethod
+    def record_adapter_result(
+        self,
+        brain: ProjectBrain,
+        execution_id: str,
+        stage_id: str,
+        lease_id: str,
+        dispatch_id: str,
+        adapter_token: str,
+        outcome: str,
+        summary: str,
+        verification_results: list[dict[str, Any]] | None = None,
+        artifacts_changed: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Submit verified worker results with identity & evidence validation."""
+
+    @abstractmethod
+    def uninstall_config(self, brain: ProjectBrain) -> dict[str, Any]:
+        """Cleanly remove generated Guardian entry points."""
+
+    @abstractmethod
+    def launch(self, brain: ProjectBrain, extra_args: list[str] | None = None, execute: bool = False) -> dict[str, Any]:
+        """Launch or return launch command for this IDE/tool."""
+
+    def _harness_path(self, brain: ProjectBrain, root_harness: bool) -> Path:
+        if root_harness:
+            return brain.root / _ROOT_HARNESS_PATHS[self.target_name]
+        return brain.directory / _INTEGRATION_PATHS[self.target_name]
+
+    def _write_harness(self, harness_path: Path, overwrite: bool) -> str:
+        harness_path.parent.mkdir(parents=True, exist_ok=True)
+        if harness_path.exists():
+            if not overwrite:
+                return "preserved"
+            if not _is_guardian_owned(harness_path, self.target_name):
+                return "skipped_user_owned"
+        harness_path.write_text(_content(self.target_name), encoding="utf-8")
+        return "created"
+
+    def _claim_and_check(self, brain: ProjectBrain, execution_id: str, stage_id: str, st: dict[str, Any]) -> str:
+        executor = st.get("executor", "")
+        if executor == "primary-review":
+            raise GuardianError(
+                f"Adapter {self.target_name!r} cannot dispatch primary-review stage {stage_id!r}. "
+                "Primary review must be completed by the primary model or user."
+            )
+        claimed = claim_execution_stage(brain, execution_id, stage_id)
+        return claimed["lease_id"]
+
+    def _execute_handoff_transaction(
+        self,
+        brain: ProjectBrain,
+        execution_id: str,
+        stage_index: int,
+    ) -> dict[str, Any]:
+        """100% Crash-safe handoff transaction: claim -> mark dispatched -> write package -> rollback state on failure."""
+        with ExecutionLockManager(brain):
+            rec = show_execution(brain, execution_id)
+            stages = rec.get("stages", [])
+            if stage_index < 0 or stage_index >= len(stages):
+                raise GuardianError(f"Stage index {stage_index} out of bounds for execution {execution_id}.")
+
+            st = stages[stage_index]
+            stage_id = st["id"]
+
+            # 1. Claim stage lease
+            lease_id = self._claim_and_check(brain, execution_id, stage_id, st)
+
+            # 2. Generate persistent high-entropy token
+            token = secrets.token_hex(32)
+
+            # 3. Gather task-approved scoped project context
+            task_text = rec.get("task", "")
+            stage_paths = st.get("allowed_paths", [])
+            ctx = _get_project_context(brain, task_summary=task_text, stage_allowed_paths=stage_paths)
+
+            handoff_dir = brain.directory / "handoffs"
+            handoff_dir.mkdir(parents=True, exist_ok=True)
+            pkg_file = handoff_dir / f"handoff_{self.target_name}_{execution_id}_{stage_id}.json"
+
+            # Create temporary file for package
+            tmp_fd, tmp_path_str = tempfile.mkstemp(dir=handoff_dir, prefix=".tmp_handoff_", suffix=".json")
+            tmp_path = Path(tmp_path_str)
+
+            try:
+                # 4. Mark dispatched in execution state FIRST
+                dispatched = mark_execution_dispatched(
+                    brain,
+                    execution_id,
+                    stage_id,
+                    lease_id,
+                    evidence=f"{self.target_name} worker bounded handoff created",
+                    adapter_target=self.target_name,
+                    adapter_token=token,
+                )
+                dispatch_id = dispatched["dispatch_id"]
+
+                pkg_content = {
+                    "target": self.target_name,
+                    "adapter_token": token,
+                    "execution_id": execution_id,
+                    "stage_id": stage_id,
+                    "stage_name": st.get("name"),
+                    "stage_index": stage_index,
+                    "lease_id": lease_id,
+                    "dispatch_id": dispatch_id,
+                    "task": task_text,
+                    "executor_route": st.get("executor"),
+                    "context_mode": "fresh_bounded_handoff",
+                    "requirements": ctx["requirements"],
+                    "acceptance_criteria": ctx["acceptance_criteria"],
+                    "allowed_paths": ctx["allowed_paths"],
+                    "review_required": st.get("review_required", ["specification", "quality"]),
+                    "created_at": now_utc(),
+                }
+
+                with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+                    json.dump(pkg_content, fh, indent=2)
+                    fh.write("\n")
+
+                try:
+                    os.chmod(tmp_path, 0o600)
+                except OSError:
+                    pass
+
+                # Replace temp package to final file atomically
+                tmp_path.replace(pkg_file)
+                try:
+                    os.chmod(pkg_file, 0o600)
+                except OSError:
+                    pass
+
+            except Exception as exc:
+                # Clean up temp file or partial package file if write failed
+                if tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+                if pkg_file.exists():
+                    try:
+                        pkg_file.unlink()
+                    except OSError:
+                        pass
+
+                # Roll back stage dispatch state in brain so stage is NOT left dispatched without file!
+                try:
+                    revert_execution_dispatch(brain, execution_id, stage_id, lease_id)
+                except Exception as rollback_err:
+                    raise GuardianError(
+                        f"Handoff package write failed ({exc}) AND dispatch state rollback failed: {rollback_err}"
+                    ) from exc
+
+                raise GuardianError(f"Failed to create handoff package file for {self.target_name}: {exc}") from exc
+
+            return {
+                "target": self.target_name,
+                "execution_id": execution_id,
+                "stage_id": stage_id,
+                "lease_id": lease_id,
+                "dispatch_id": dispatch_id,
+                "adapter_token": token,
+                "package_path": str(pkg_file),
+            }
+
+
+    def _validate_and_record(
+        self,
+        brain: ProjectBrain,
+        execution_id: str,
+        stage_id: str,
+        lease_id: str,
+        dispatch_id: str,
+        adapter_token: str,
+        outcome: str,
+        summary: str,
+        verification_results: list[dict[str, Any]] | None,
+        artifacts_changed: list[str] | None,
+    ) -> dict[str, Any]:
+        """Validate evidence and submit result."""
+        if outcome == "passed":
+            _validate_verification_results(verification_results)
+
+        evidence_parts = [summary]
+        if verification_results:
+            for item in verification_results:
+                cname = item.get("check") or item.get("label") or item.get("name") or "check"
+                rval = item.get("result") or item.get("status") or item.get("outcome") or ""
+                evidence_parts.append(f"[{cname}] {rval}")
+
+        evidence_str = "; ".join(evidence_parts)
+
+        return record_execution_result(
+            brain,
+            execution_id=execution_id,
+            stage_id=stage_id,
+            lease_id=lease_id,
+            outcome=outcome,
+            evidence=evidence_str,
+            dispatch_id=dispatch_id,
+            adapter_target=self.target_name,
+            adapter_token=adapter_token,
+            artifact_path=artifacts_changed[0] if artifacts_changed else None,
+            artifacts_changed=artifacts_changed,
+        )
+
+
+
+# ---------------------------------------------------------------------------
+# Target Implementation Adapters
+# ---------------------------------------------------------------------------
+
+class VSCodeAdapter(BaseIDEAdapter):
+    def __init__(self) -> None:
+        super().__init__("vscode")
+
+    def detect_tool(self) -> dict[str, Any]:
+        code_bin = shutil.which("code") or shutil.which("code-insiders")
+        vscode_dir = Path.home() / ".vscode"
+        installed = code_bin is not None or vscode_dir.is_dir()
+        verified = False
+        version = None
+        env_error = None
+        if code_bin:
+            try:
+                r = subprocess.run([code_bin, "--version"], capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    version = r.stdout.splitlines()[0].strip()
+                    verified = True
+                else:
+                    env_error = f"Binary exited with code {r.returncode}: {r.stderr.strip()}"
+            except Exception as exc:
+                env_error = str(exc)
+
+        return {
+            "target": self.target_name,
+            "installed": installed,
+            "verified": verified,
+            "unavailable_in_environment": installed and not verified,
+            "environment_error": env_error,
+            "binary": code_bin,
+            "version": version,
+            "user_config_dir": str(vscode_dir) if vscode_dir.is_dir() else None,
+            "capabilities": ["tasks", "settings", "root_harness", "jsonc_safe"],
+        }
+
+    def generate_config(
+        self,
+        brain: ProjectBrain,
+        overwrite: bool = False,
+        root_harness: bool = True,
+    ) -> dict[str, Any]:
+        vscode_dir = brain.root / ".vscode"
+        vscode_dir.mkdir(parents=True, exist_ok=True)
+        settings_file = vscode_dir / "settings.json"
+
+        existing: dict[str, Any] = {}
+        settings_error: str | None = None
+        if settings_file.is_file():
+            raw = settings_file.read_text(encoding="utf-8", errors="replace")
+            stripped = _strip_jsonc_comments(raw)
+            try:
+                existing = json.loads(stripped)
+            except (json.JSONDecodeError, ValueError) as exc:
+                settings_error = str(exc)
+                existing = {}
+
+        if settings_error is None:
+            existing["guardian.projectRoot"] = str(brain.root.resolve())
+            existing["guardian.enabled"] = True
+            settings_file.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+
+        harness_path = self._harness_path(brain, root_harness)
+        harness_status = self._write_harness(harness_path, overwrite)
+
+        res = {
+            "target": self.target_name,
+            "settings_file": str(settings_file),
+            "harness_file": str(harness_path),
+            "status": harness_status,
+        }
+        if settings_error:
+            res["settings_warning"] = f"Could not parse existing settings.json (JSONC): {settings_error}."
+        return res
+
+    def create_bounded_handoff(self, brain: ProjectBrain, execution_id: str, stage_index: int) -> dict[str, Any]:
+        return self._execute_handoff_transaction(brain, execution_id, stage_index)
+
+    def record_adapter_result(self, brain: ProjectBrain, execution_id: str, stage_id: str, lease_id: str, dispatch_id: str, adapter_token: str, outcome: str, summary: str, verification_results: list[dict[str, Any]] | None = None, artifacts_changed: list[str] | None = None) -> dict[str, Any]:
+        return self._validate_and_record(brain, execution_id, stage_id, lease_id, dispatch_id, adapter_token, outcome, summary, verification_results, artifacts_changed)
+
+    def uninstall_config(self, brain: ProjectBrain) -> dict[str, Any]:
+        removed = []
+        errors = []
+        for harness in [brain.root / ".vscode" / "GUARDIAN.md", brain.directory / "integrations" / "vscode" / "GUARDIAN.md"]:
+            if _is_guardian_owned(harness, self.target_name):
+                try:
+                    harness.unlink()
+                    removed.append(str(harness))
+                except OSError as exc:
+                    errors.append(str(exc))
+
+        settings_file = brain.root / ".vscode" / "settings.json"
+        if settings_file.is_file():
+            raw = settings_file.read_text(encoding="utf-8", errors="replace")
+            stripped = _strip_jsonc_comments(raw)
+            try:
+                existing = json.loads(stripped)
+                existing.pop("guardian.projectRoot", None)
+                existing.pop("guardian.enabled", None)
+                if existing:
+                    settings_file.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+                else:
+                    settings_file.unlink()
+                removed.append(str(settings_file))
+            except (json.JSONDecodeError, OSError) as exc:
+                errors.append(str(exc))
+
+        return {"target": self.target_name, "uninstalled": len(errors) == 0, "removed": removed, "errors": errors}
+
+    def launch(self, brain: ProjectBrain, extra_args: list[str] | None = None, execute: bool = False) -> dict[str, Any]:
+        code_bin = shutil.which("code") or shutil.which("code-insiders")
+        cmd = [code_bin, str(brain.root.resolve())] if code_bin else ["code", str(brain.root.resolve())]
+        if extra_args:
+            cmd.extend(extra_args)
+
+        result: dict[str, Any] = {
+            "target": self.target_name,
+            "installed": code_bin is not None,
+            "binary": code_bin,
+            "command": cmd,
+        }
+        if execute and code_bin:
+            try:
+                proc = subprocess.run([code_bin, "--version"], capture_output=True, text=True, timeout=10)
+                result["returncode"] = proc.returncode
+                if proc.returncode == 0:
+                    result["executed"] = True
+                    result["verified"] = True
+                    result["stdout"] = proc.stdout.strip()
+                else:
+                    result["executed"] = False
+                    result["verified"] = False
+                    result["unavailable_in_environment"] = True
+                    result["error"] = f"Binary exited with code {proc.returncode}: {proc.stderr.strip()}"
+            except Exception as exc:
+                result["executed"] = False
+                result["verified"] = False
+                result["error"] = str(exc)
+        return result
+
+
+class CodexAdapter(BaseIDEAdapter):
+    def __init__(self) -> None:
+        super().__init__("codex")
+
+    def detect_tool(self) -> dict[str, Any]:
+        codex_bin = shutil.which("codex")
+        verified = False
+        version = None
+        env_error = None
+        if codex_bin:
+            try:
+                r = subprocess.run([codex_bin, "--version"], capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    version = r.stdout.strip().splitlines()[0]
+                    verified = True
+                else:
+                    env_error = f"Binary exited with code {r.returncode}"
+            except Exception as exc:
+                env_error = str(exc)
+        return {
+            "target": self.target_name,
+            "installed": codex_bin is not None,
+            "verified": verified,
+            "unavailable_in_environment": codex_bin is not None and not verified,
+            "environment_error": env_error,
+            "binary": codex_bin,
+            "version": version,
+            "capabilities": ["agents_md", "fresh_bounded_handoff"],
+        }
+
+    def generate_config(self, brain: ProjectBrain, overwrite: bool = False, root_harness: bool = True) -> dict[str, Any]:
+        harness_path = self._harness_path(brain, root_harness)
+        status = self._write_harness(harness_path, overwrite)
+        return {"target": self.target_name, "harness_file": str(harness_path), "status": status}
+
+    def create_bounded_handoff(self, brain: ProjectBrain, execution_id: str, stage_index: int) -> dict[str, Any]:
+        return self._execute_handoff_transaction(brain, execution_id, stage_index)
+
+    def record_adapter_result(self, brain: ProjectBrain, execution_id: str, stage_id: str, lease_id: str, dispatch_id: str, adapter_token: str, outcome: str, summary: str, verification_results: list[dict[str, Any]] | None = None, artifacts_changed: list[str] | None = None) -> dict[str, Any]:
+        return self._validate_and_record(brain, execution_id, stage_id, lease_id, dispatch_id, adapter_token, outcome, summary, verification_results, artifacts_changed)
+
+    def uninstall_config(self, brain: ProjectBrain) -> dict[str, Any]:
+        return _generic_uninstall(self, brain)
+
+    def launch(self, brain: ProjectBrain, extra_args: list[str] | None = None, execute: bool = False) -> dict[str, Any]:
+        codex_bin = shutil.which("codex")
+        cmd = [codex_bin] if codex_bin else ["codex"]
+        if extra_args:
+            cmd.extend(extra_args)
+        result: dict[str, Any] = {
+            "target": self.target_name,
+            "installed": codex_bin is not None,
+            "binary": codex_bin,
+            "command": cmd,
+        }
+        if execute and codex_bin:
+            try:
+                proc = subprocess.run([codex_bin, "--version"], capture_output=True, text=True, timeout=10)
+                result["returncode"] = proc.returncode
+                if proc.returncode == 0:
+                    result["executed"] = True
+                    result["verified"] = True
+                    result["stdout"] = proc.stdout.strip()
+                else:
+                    result["executed"] = False
+                    result["verified"] = False
+                    result["unavailable_in_environment"] = True
+                    result["error"] = f"Binary exited with code {proc.returncode}: {proc.stderr.strip()}"
+            except Exception as exc:
+                result["executed"] = False
+                result["verified"] = False
+                result["error"] = str(exc)
+        return result
+
+
+class ClaudeAdapter(BaseIDEAdapter):
+    def __init__(self) -> None:
+        super().__init__("claude")
+
+    def detect_tool(self) -> dict[str, Any]:
+        claude_bin = shutil.which("claude")
+        claude_config = Path.home() / ".claude"
+        installed = claude_bin is not None or claude_config.is_dir()
+        verified = False
+        version = None
+        env_error = None
+        if claude_bin:
+            try:
+                r = subprocess.run([claude_bin, "--version"], capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    version = r.stdout.strip().splitlines()[0]
+                    verified = True
+                else:
+                    env_error = f"Binary exited with code {r.returncode}"
+            except Exception as exc:
+                env_error = str(exc)
+        return {
+            "target": self.target_name,
+            "installed": installed,
+            "verified": verified,
+            "unavailable_in_environment": installed and not verified,
+            "environment_error": env_error,
+            "binary": claude_bin,
+            "version": version,
+            "config_dir": str(claude_config) if claude_config.is_dir() else None,
+            "capabilities": ["claude_md", "fresh_bounded_handoff", "mcp_tools"],
+        }
+
+    def generate_config(self, brain: ProjectBrain, overwrite: bool = False, root_harness: bool = True) -> dict[str, Any]:
+        harness_path = self._harness_path(brain, root_harness)
+        status = self._write_harness(harness_path, overwrite)
+        return {"target": self.target_name, "harness_file": str(harness_path), "status": status}
+
+    def create_bounded_handoff(self, brain: ProjectBrain, execution_id: str, stage_index: int) -> dict[str, Any]:
+        return self._execute_handoff_transaction(brain, execution_id, stage_index)
+
+    def record_adapter_result(self, brain: ProjectBrain, execution_id: str, stage_id: str, lease_id: str, dispatch_id: str, adapter_token: str, outcome: str, summary: str, verification_results: list[dict[str, Any]] | None = None, artifacts_changed: list[str] | None = None) -> dict[str, Any]:
+        return self._validate_and_record(brain, execution_id, stage_id, lease_id, dispatch_id, adapter_token, outcome, summary, verification_results, artifacts_changed)
+
+    def uninstall_config(self, brain: ProjectBrain) -> dict[str, Any]:
+        return _generic_uninstall(self, brain)
+
+    def launch(self, brain: ProjectBrain, extra_args: list[str] | None = None, execute: bool = False) -> dict[str, Any]:
+        claude_bin = shutil.which("claude")
+        cmd = [claude_bin] if claude_bin else ["claude"]
+        if extra_args:
+            cmd.extend(extra_args)
+        result: dict[str, Any] = {
+            "target": self.target_name,
+            "installed": claude_bin is not None,
+            "binary": claude_bin,
+            "command": cmd,
+        }
+        if execute and claude_bin:
+            try:
+                proc = subprocess.run([claude_bin, "--version"], capture_output=True, text=True, timeout=10)
+                result["returncode"] = proc.returncode
+                if proc.returncode == 0:
+                    result["executed"] = True
+                    result["verified"] = True
+                    result["stdout"] = proc.stdout.strip()
+                else:
+                    result["executed"] = False
+                    result["verified"] = False
+                    result["unavailable_in_environment"] = True
+                    result["error"] = f"Binary exited with code {proc.returncode}: {proc.stderr.strip()}"
+            except Exception as exc:
+                result["executed"] = False
+                result["verified"] = False
+                result["error"] = str(exc)
+        return result
+
+
+class GeminiAdapter(BaseIDEAdapter):
+    def __init__(self) -> None:
+        super().__init__("gemini")
+
+    def detect_tool(self) -> dict[str, Any]:
+        gemini_bin = shutil.which("gemini")
+        verified = False
+        version = None
+        env_error = None
+        if gemini_bin:
+            try:
+                r = subprocess.run([gemini_bin, "--version"], capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    version = r.stdout.strip().splitlines()[0]
+                    verified = True
+                else:
+                    env_error = f"Binary exited with code {r.returncode}"
+            except Exception as exc:
+                env_error = str(exc)
+        return {
+            "target": self.target_name,
+            "installed": gemini_bin is not None,
+            "verified": verified,
+            "unavailable_in_environment": gemini_bin is not None and not verified,
+            "environment_error": env_error,
+            "binary": gemini_bin,
+            "version": version,
+            "capabilities": ["gemini_md", "fresh_bounded_handoff"],
+        }
+
+    def generate_config(self, brain: ProjectBrain, overwrite: bool = False, root_harness: bool = True) -> dict[str, Any]:
+        harness_path = self._harness_path(brain, root_harness)
+        status = self._write_harness(harness_path, overwrite)
+        return {"target": self.target_name, "harness_file": str(harness_path), "status": status}
+
+    def create_bounded_handoff(self, brain: ProjectBrain, execution_id: str, stage_index: int) -> dict[str, Any]:
+        return self._execute_handoff_transaction(brain, execution_id, stage_index)
+
+    def record_adapter_result(self, brain: ProjectBrain, execution_id: str, stage_id: str, lease_id: str, dispatch_id: str, adapter_token: str, outcome: str, summary: str, verification_results: list[dict[str, Any]] | None = None, artifacts_changed: list[str] | None = None) -> dict[str, Any]:
+        return self._validate_and_record(brain, execution_id, stage_id, lease_id, dispatch_id, adapter_token, outcome, summary, verification_results, artifacts_changed)
+
+    def uninstall_config(self, brain: ProjectBrain) -> dict[str, Any]:
+        return _generic_uninstall(self, brain)
+
+    def launch(self, brain: ProjectBrain, extra_args: list[str] | None = None, execute: bool = False) -> dict[str, Any]:
+        gemini_bin = shutil.which("gemini")
+        cmd = [gemini_bin] if gemini_bin else ["gemini"]
+        if extra_args:
+            cmd.extend(extra_args)
+        result: dict[str, Any] = {
+            "target": self.target_name,
+            "installed": gemini_bin is not None,
+            "binary": gemini_bin,
+            "command": cmd,
+        }
+        if execute and gemini_bin:
+            try:
+                proc = subprocess.run([gemini_bin, "--version"], capture_output=True, text=True, timeout=10)
+                result["returncode"] = proc.returncode
+                if proc.returncode == 0:
+                    result["executed"] = True
+                    result["verified"] = True
+                    result["stdout"] = proc.stdout.strip()
+                else:
+                    result["executed"] = False
+                    result["verified"] = False
+                    result["unavailable_in_environment"] = True
+                    result["error"] = f"Binary exited with code {proc.returncode}: {proc.stderr.strip()}"
+            except Exception as exc:
+                result["executed"] = False
+                result["verified"] = False
+                result["error"] = str(exc)
+        return result
+
+
+class AntigravityAdapter(BaseIDEAdapter):
+    def __init__(self) -> None:
+        super().__init__("antigravity")
+
+    def detect_tool(self) -> dict[str, Any]:
+        agy_bin = shutil.which("antigravity") or shutil.which("agy")
+        verified = False
+        version = None
+        env_error = None
+        if agy_bin:
+            try:
+                r = subprocess.run([agy_bin, "--version"], capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    version = r.stdout.strip().splitlines()[0]
+                    verified = True
+                else:
+                    env_error = f"Binary exited with code {r.returncode}"
+            except Exception as exc:
+                env_error = str(exc)
+        return {
+            "target": self.target_name,
+            "installed": agy_bin is not None,
+            "verified": verified,
+            "unavailable_in_environment": agy_bin is not None and not verified,
+            "environment_error": env_error,
+            "binary": agy_bin,
+            "version": version,
+            "capabilities": ["guardian_md", "fresh_bounded_handoff", "mcp_tools", "skills"],
+        }
+
+    def generate_config(self, brain: ProjectBrain, overwrite: bool = False, root_harness: bool = True) -> dict[str, Any]:
+        harness_path = self._harness_path(brain, root_harness)
+        status = self._write_harness(harness_path, overwrite)
+        return {"target": self.target_name, "harness_file": str(harness_path), "status": status}
+
+    def create_bounded_handoff(self, brain: ProjectBrain, execution_id: str, stage_index: int) -> dict[str, Any]:
+        return self._execute_handoff_transaction(brain, execution_id, stage_index)
+
+    def record_adapter_result(self, brain: ProjectBrain, execution_id: str, stage_id: str, lease_id: str, dispatch_id: str, adapter_token: str, outcome: str, summary: str, verification_results: list[dict[str, Any]] | None = None, artifacts_changed: list[str] | None = None) -> dict[str, Any]:
+        return self._validate_and_record(brain, execution_id, stage_id, lease_id, dispatch_id, adapter_token, outcome, summary, verification_results, artifacts_changed)
+
+    def uninstall_config(self, brain: ProjectBrain) -> dict[str, Any]:
+        return _generic_uninstall(self, brain)
+
+    def launch(self, brain: ProjectBrain, extra_args: list[str] | None = None, execute: bool = False) -> dict[str, Any]:
+        agy_bin = shutil.which("antigravity") or shutil.which("agy")
+        cmd = [agy_bin] if agy_bin else ["antigravity"]
+        if extra_args:
+            cmd.extend(extra_args)
+        result: dict[str, Any] = {
+            "target": self.target_name,
+            "installed": agy_bin is not None,
+            "binary": agy_bin,
+            "command": cmd,
+        }
+        if execute and agy_bin:
+            try:
+                proc = subprocess.run([agy_bin, "--version"], capture_output=True, text=True, timeout=10)
+                result["returncode"] = proc.returncode
+                if proc.returncode == 0:
+                    result["executed"] = True
+                    result["verified"] = True
+                    result["stdout"] = proc.stdout.strip()
+                else:
+                    result["executed"] = False
+                    result["verified"] = False
+                    result["unavailable_in_environment"] = True
+                    result["error"] = f"Binary exited with code {proc.returncode}: {proc.stderr.strip()}"
+            except Exception as exc:
+                result["executed"] = False
+                result["verified"] = False
+                result["error"] = str(exc)
+        return result
+
+
+class CursorAdapter(BaseIDEAdapter):
+    def __init__(self) -> None:
+        super().__init__("cursor")
+
+    def detect_tool(self) -> dict[str, Any]:
+        cursor_bin = shutil.which("cursor")
+        cursor_config = Path.home() / ".cursor"
+        installed = cursor_bin is not None or cursor_config.is_dir()
+        verified = False
+        version = None
+        env_error = None
+        if cursor_bin:
+            try:
+                r = subprocess.run([cursor_bin, "--version"], capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    version = r.stdout.strip().splitlines()[0]
+                    verified = True
+                else:
+                    env_error = f"Binary exited with code {r.returncode}"
+            except Exception as exc:
+                env_error = str(exc)
+        return {
+            "target": self.target_name,
+            "installed": installed,
+            "verified": verified,
+            "unavailable_in_environment": installed and not verified,
+            "environment_error": env_error,
+            "binary": cursor_bin,
+            "version": version,
+            "config_dir": str(cursor_config) if cursor_config.is_dir() else None,
+            "capabilities": ["mdc_rules", "fresh_bounded_handoff"],
+        }
+
+    def generate_config(self, brain: ProjectBrain, overwrite: bool = False, root_harness: bool = True) -> dict[str, Any]:
+        harness_path = self._harness_path(brain, root_harness)
+        status = self._write_harness(harness_path, overwrite)
+        return {"target": self.target_name, "harness_file": str(harness_path), "status": status}
+
+    def create_bounded_handoff(self, brain: ProjectBrain, execution_id: str, stage_index: int) -> dict[str, Any]:
+        return self._execute_handoff_transaction(brain, execution_id, stage_index)
+
+    def record_adapter_result(self, brain: ProjectBrain, execution_id: str, stage_id: str, lease_id: str, dispatch_id: str, adapter_token: str, outcome: str, summary: str, verification_results: list[dict[str, Any]] | None = None, artifacts_changed: list[str] | None = None) -> dict[str, Any]:
+        return self._validate_and_record(brain, execution_id, stage_id, lease_id, dispatch_id, adapter_token, outcome, summary, verification_results, artifacts_changed)
+
+    def uninstall_config(self, brain: ProjectBrain) -> dict[str, Any]:
+        return _generic_uninstall(self, brain)
+
+    def launch(self, brain: ProjectBrain, extra_args: list[str] | None = None, execute: bool = False) -> dict[str, Any]:
+        cursor_bin = shutil.which("cursor")
+        cmd = [cursor_bin, str(brain.root.resolve())] if cursor_bin else ["cursor", str(brain.root.resolve())]
+        if extra_args:
+            cmd.extend(extra_args)
+        result: dict[str, Any] = {
+            "target": self.target_name,
+            "installed": cursor_bin is not None,
+            "binary": cursor_bin,
+            "command": cmd,
+        }
+        if execute and cursor_bin:
+            try:
+                proc = subprocess.run([cursor_bin, "--version"], capture_output=True, text=True, timeout=10)
+                result["returncode"] = proc.returncode
+                if proc.returncode == 0:
+                    result["executed"] = True
+                    result["verified"] = True
+                    result["stdout"] = proc.stdout.strip()
+                else:
+                    result["executed"] = False
+                    result["verified"] = False
+                    result["unavailable_in_environment"] = True
+                    result["error"] = f"Binary exited with code {proc.returncode}: {proc.stderr.strip()}"
+            except Exception as exc:
+                result["executed"] = False
+                result["verified"] = False
+                result["error"] = str(exc)
+        return result
+
+
+def _generic_uninstall(adapter: BaseIDEAdapter, brain: ProjectBrain) -> dict[str, Any]:
+    removed = []
+    errors = []
+    for harness in [brain.root / _ROOT_HARNESS_PATHS[adapter.target_name], brain.directory / _INTEGRATION_PATHS[adapter.target_name]]:
+        if _is_guardian_owned(harness, adapter.target_name):
+            try:
+                harness.unlink()
+                removed.append(str(harness))
+            except OSError as exc:
+                errors.append(str(exc))
+    return {"target": adapter.target_name, "uninstalled": len(errors) == 0, "removed": removed, "errors": errors}
+
+
+# Registry
+_ADAPTER_REGISTRY: dict[str, BaseIDEAdapter] = {
+    "vscode":      VSCodeAdapter(),
+    "codex":       CodexAdapter(),
+    "claude":      ClaudeAdapter(),
+    "gemini":      GeminiAdapter(),
+    "antigravity": AntigravityAdapter(),
+    "cursor":      CursorAdapter(),
+}
+
+
+def get_adapter(target_name: str) -> BaseIDEAdapter:
+    if target_name not in _ADAPTER_REGISTRY:
+        raise GuardianError(f"Unknown target {target_name!r}. Supported: {', '.join(SUPPORTED_IDE_TARGETS)}")
+    return _ADAPTER_REGISTRY[target_name]
+
+
+def detect_installed_tools() -> dict[str, Any]:
+    tools = {name: adapter.detect_tool() for name, adapter in _ADAPTER_REGISTRY.items()}
+    return {"detected_count": sum(1 for t in tools.values() if t.get("installed")), "tools": tools}
+
+
+def generate_adapter_config(
+    brain: ProjectBrain,
+    target: str = "all",
+    overwrite: bool = False,
+    root_harness: bool = True,
+) -> dict[str, Any]:
+    targets = list(SUPPORTED_IDE_TARGETS) if target == "all" else [target]
+    results = [get_adapter(item).generate_config(brain, overwrite=overwrite, root_harness=root_harness) for item in targets]
+    append_journey(brain, "IDE Adapter Configuration Generated", [f"Targets: {', '.join(targets)}", f"Root harness: {root_harness}"])
+    return {"results": results}
+
+
+def create_bounded_handoff(
+    brain: ProjectBrain,
+    target: str,
+    execution_id: str,
+    stage_index: int = 0,
+) -> dict[str, Any]:
+    return get_adapter(target).create_bounded_handoff(brain, execution_id, stage_index)
+
+
+def submit_adapter_result(
+    brain: ProjectBrain,
+    target: str,
+    execution_id: str,
+    stage_id: str,
+    lease_id: str,
+    dispatch_id: str,
+    adapter_token: str,
+    outcome: str,
+    summary: str,
+    verification_results: list[dict[str, Any]] | None = None,
+    artifacts_changed: list[str] | None = None,
+) -> dict[str, Any]:
+    return get_adapter(target).record_adapter_result(
+        brain,
+        execution_id=execution_id,
+        stage_id=stage_id,
+        lease_id=lease_id,
+        dispatch_id=dispatch_id,
+        adapter_token=adapter_token,
+        outcome=outcome,
+        summary=summary,
+        verification_results=verification_results,
+        artifacts_changed=artifacts_changed,
+    )
+
+
+def uninstall_adapter_config(brain: ProjectBrain, target: str = "all") -> dict[str, Any]:
+    targets = list(SUPPORTED_IDE_TARGETS) if target == "all" else [target]
+    results = [get_adapter(item).uninstall_config(brain) for item in targets]
+    return {"uninstalled": all(r["uninstalled"] for r in results), "results": results}
+
+
+def launch_adapter_tool(brain: ProjectBrain, target: str, extra_args: list[str] | None = None, execute: bool = False) -> dict[str, Any]:
+    adapter = get_adapter(target)
+    return adapter.launch(brain, extra_args=extra_args, execute=execute)

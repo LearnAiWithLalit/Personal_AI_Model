@@ -1,0 +1,4 @@
+interface:
+  display_name: "Guardian Worktree"
+  short_description: "Isolate implementation in a git worktree"
+  default_prompt: "Use $guardian-worktree to create and validate an isolated implementation workspace."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Guardian Debug"
+  short_description: "Find root causes before proposing fixes"
+  default_prompt: "Use $guardian-debug to reproduce this issue and identify its root cause."

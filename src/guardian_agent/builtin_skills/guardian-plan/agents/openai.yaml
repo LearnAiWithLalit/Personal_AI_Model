@@ -1,0 +1,4 @@
+interface:
+  display_name: "Guardian Plan"
+  short_description: "Create a small verifiable implementation plan"
+  default_prompt: "Use $guardian-plan to turn the approved design into verifiable tasks."

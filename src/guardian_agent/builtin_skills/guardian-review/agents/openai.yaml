@@ -1,0 +1,4 @@
+interface:
+  display_name: "Guardian Review"
+  short_description: "Review spec compliance then code quality"
+  default_prompt: "Use $guardian-review to check specification compliance and code quality."

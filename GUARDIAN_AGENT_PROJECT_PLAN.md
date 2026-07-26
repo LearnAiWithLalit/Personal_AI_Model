@@ -709,25 +709,133 @@ The system is not production-ready until it can demonstrate all of the following
 - Prove token/cost savings and task-quality gains on the evaluation suite.
 - Let a separate user install the product and use only their own accounts, providers, browser profiles, and project memory.
 
-## 30. Implementation Status — 2026-07-26
+## 30. Free-Resource Operating Plan
+
+Guardian must minimize primary-model usage by treating Ollama, OmniRoute, and
+FreeBuff as complementary resources rather than three interchangeable chat
+interfaces.
+
+### 30.1 Routing order
+
+```text
+User request
+  -> Guardian deterministic intake, risk, profiles, skills, memory retrieval
+  -> user confirms the exact orchestration ID
+  -> Ollama for private analysis, summaries, repository maps, and first drafts
+  -> FreeBuff for a bounded coding package when repository edits are needed
+  -> OmniRoute only for a missing specialty, failed/weak local result, or independent review
+  -> primary Codex/Claude/Gemini reviews compact evidence and gives the final green signal
+```
+
+1. **Zero-model Guardian first.** Use deterministic classification, retrieval,
+   policy checks, route health, quota state, and compact-context generation.
+2. **Ollama second.** Prefer local models for private requirements analysis,
+   decomposition, research summarization, test triage, code explanation,
+   skill drafting, and ordinary planning/coding. Send only the selected files
+   and compact project context.
+3. **FreeBuff for bounded implementation.** Give it one confirmed task, the
+   minimum relevant files, acceptance criteria, constraints, and test command.
+   Do not send `.env`, vault data, credentials, account identifiers, raw logs,
+   or unrelated files. Use one continuing FreeBuff session per task where
+   possible; do not evade its daily/session limits.
+4. **OmniRoute for specialist fallback and review.** Choose a healthy,
+   capability-matched free-limited combo only when Ollama is insufficient.
+   Use redacted log health, quota/capacity evidence, provider diversity, and a
+   maximum of five attempts. Never call all combos merely to obtain more
+   opinions. Keep the GPT-5.5 combo last as the final-review reserve.
+5. **Primary model as authority.** Codex, Claude, Gemini, or another user-chosen
+   primary model reviews the compact requirement, patch/diff, test evidence,
+   unresolved risks, and conflicting worker findings. It handles high-risk
+   judgment and gives the final green signal; it should not repeat successful
+   repository mapping, routine terminal checks, or background research.
+
+### 30.2 Escalation and conservation rules
+
+- Stay deterministic when no generation is needed.
+- Use cached project memory and reusable lessons before any model request.
+- One task gets one compact handoff; workers do not receive the full chat.
+- Reuse a live FreeBuff conversation instead of starting another session.
+- Prefer Ollama when expected quality is adequate, even if a remote route is free,
+  because remote pools showed much higher prompt-token overhead.
+- Escalate from Ollama only after a concrete failure, low-confidence result,
+  missing capability, or required independent review.
+- Recheck OmniRoute health before dispatch; skip penalized, exhausted, blocked,
+  or newly changed combos.
+- Reserve at least one healthy high-quality route for final review instead of
+  spending every quota during drafting.
+- Stop after the bounded attempt limit and return evidence to the primary model;
+  never create retry loops that silently consume daily quotas.
+- Run focused tests first, then the full local suite once. Send only the result,
+  failure excerpt, changed-file list, and unresolved risks to the final reviewer.
+
+### 30.3 Resource responsibilities
+
+| Resource | Default responsibility | Must not do |
+|---|---|---|
+| Guardian | Intake, confirmation, policy, memory, routing, budgets, recovery, compact handoffs | Spend a model call on deterministic work |
+| Ollama | Private/local reasoning, summaries, triage, first drafts, lightweight review | Decide external approvals or final high-risk acceptance |
+| FreeBuff | Confirmed bounded repository implementation and focused tests | Receive secrets/unrelated files, commit, push, or perform unapproved external actions |
+| OmniRoute | Capability fallback, diverse second opinion, difficult specialist work, reserved final review | Fan out to every combo or bypass model/member policy |
+| Primary model | Resolve ambiguity/conflicts, inspect evidence, high-risk review, final green signal | Re-read the entire journey or redo verified routine work |
+
+### 30.4 Review checkpoints
+
+- Before dispatch: exact requirement confirmation, risk profile, selected
+  profiles/skills, route order, quota reserve, and allowed files.
+- During delegated work: revisit only on a worker question, policy boundary,
+  failure, or timed completion checkpoint.
+- After delegated work: inspect the diff, reject unrelated changes, run focused
+  and full tests, check prohibited models/secrets, then request the primary
+  model's compact final review.
+- Persist the result, mistakes, and reusable prevention lesson so the next
+  project begins with the improved routing decision.
+
+## 31. Implementation Status — 2026-07-26
 
 ### Implemented foundation
 
 - Local project brain with requirements, confirmation, decisions, lessons, journey records, and compact handoff exports.
 - Provider registry and low-cost routing; provider calls now resolve an environment or `vault://` credential only at request time.
 - Authenticated encrypted local vault using a passphrase-derived Fernet key. Legacy obfuscated vault records are read only for one-time migration.
-- Skill draft/promotion records, specialist-role handoff packages, task queue, locks, crash recovery, and emergency stop.
+- Skill draft/promotion records, specialist-role handoff packages, task queue, locks, crash recovery, and a persistent emergency stop whose resume path requires exact one-time approval.
 - Approval queue with exact action/target, one-time approval consumption, coding verification without a shell, and sandbox-copy rollback support.
 - Browser inspection plus bounded Playwright navigate/click/fill/screenshot/submit actions. Submission is visible by default and policy-gated.
 - Opt-in LLM Council protocol for safe analysis: independent model opinions, anonymized peer review, chairman synthesis, and retained deliberation artifacts. It is never a path to autonomous external action.
 - Optional Freebuff interactive coding-worker adapter that builds a compact project handoff and launches/continues only user-controlled terminal sessions; it does not collect Freebuff credentials or evade service limits.
+- Unified persistent orchestration lifecycle with deterministic task/risk classification, at most five specialist profiles and five compact routes, exact-ID confirmation, collision-safe requirement recording, local/free-limited ordering, a last-position final-review reserve, compact dispatch, show/list/recovery commands, and no model or external call during orchestration.
 - Secure MCP stdio foundation with untrusted-by-default server registration, exact command trust approval, dynamic tool discovery, explicit read/write allowlisting, schema pinning, one-time approval for write calls, and audited results.
+- Adaptive engineering workflow with fast/standard/high-assurance profiles, design/final approval gates, automatic built-in skill selection, specification and quality review stages, fresh verification evidence, and completion-state enforcement.
+- Packaged brainstorming, planning, TDD, systematic debugging, two-stage review, fresh verification, and real-worktree skills with compact trigger metadata and deterministic selection evaluation.
+- Persistent debugging evidence ledger with reproduction, hypotheses, minimal attempts, and mandatory architecture review after three failed fixes.
+- Real git worktree creation for git projects, bounded rollback paths, fresh-context worker packages, and non-destructive bootstrap exports for Codex, Claude, Gemini, Antigravity, Cursor, and VS Code.
+- Complete original 150-profile specialist catalog across 10 domains, with local deterministic selection, compact/full inspection, schema and model-policy validation, bounded handoff generation, journey logging, and estimated context-savings telemetry.
+- Live Ollama discovery and conservative capability routing for every allowed model installed on the user's machine; verified local completion keeps ordinary planning, research, documentation, and coding assistance off paid APIs.
+- Live OmniRoute combo discovery on `http://localhost:3000`, conservative free/paid classification, transitive prohibited-model checks over combo members, exact-route testing, bounded failover, and execution-time combo re-auditing to prevent unsafe membership changes.
+- User-confirmed `free-limited` funding classification for exact audited OmniRoute combos, with persistent rediscovery-safe policy, zero incremental billed-cost accounting, retained equivalent-cost analytics, capacity tracking, and diversified fallback ordering. Eight requested combos were live audited and exercised; all reached the provider, seven returned exact `OK`, and the NVIDIA pool responded but exhausted the initial eight-token cap. GPT-5.5 is reserved as a final-review route, while local Ollama remains preferred because successful combo smoke checks consumed 20,804 reported tokens.
+- Redacted local OmniRoute usage-log auditing with strict loopback-only access, bounded response/event sizes, discarded raw lines and account/connection identifiers, combo-member correlation, persistent health evidence, and bounded routing penalties. A zero-completion 15-minute maintenance job now refreshes this evidence; the first 100-event audit demoted three unstable pools while leaving five healthy requested pools unpenalized.
+- Persistent concurrency-safe UTC-day token/cost budgeting with conservative preflight reservation, actual-usage settlement, conservative failed-call charging, configurable output caps, and fail-closed pricing requirements for paid routes.
+- Versioned `guardian-eval-v1` evidence covering catalog integrity, representative specialist routing, prohibited-model aliases, context savings, and optional live model-quality rubrics. The local `qwen2.5:14b` run passed all three live scenarios using 609 reported tokens at zero API cost.
+- Budget-aware OpenAI-compatible SSE streaming with chunk callbacks, provider-usage settlement, conservative interrupted-stream charging, and an explicit prohibition on unsafe partial-stream failover.
+- Secret-safe provider capacity telemetry with allowlisted quota/rate-limit/backend headers, latency and retry-window tracking, pre-call exhaustion blocking, bounded history, observed prompt-inflation measurement, learned reservation multipliers, and efficiency-based route penalties. Live evidence measured roughly 25 prompt tokens on Ollama versus 2,032 on the audited free OmniRoute route for tiny requests; local routing remains preferred.
+- Zero-completion `/models` capacity probes with credential isolation, catalog size bounds, advertised-model verification, allowlisted response telemetry, and preservation of prior usage evidence. Live probes advertised 4 Ollama models and 2,273 OmniRoute routes without consuming completion tokens.
+- Longitudinal `guardian-evaluation-history-v1` aggregation across versioned evaluation artifacts, reporting runs, scenario pass rate, quality, tokens per scenario, and cost per provider/model. Measured local results currently show 100% on both `qwen2.5:14b` (203 tokens/scenario) and `qwen2.5-coder:14b` (245 tokens/scenario); bounded quality adjustments now complement task affinity and efficiency penalties.
+- Secure external-skill registry for six researched ecosystems, with metadata-only search, registered HTTPS/raw-prefix enforcement, size/encoding/frontmatter checks, prompt-injection and dangerous-pattern inspection, SHA-256 provenance, quarantine, integrity recheck, and one-time approval before draft acceptance.
+- Local-model skill factory that creates up to ten reusable skills in one bounded call, validates the complete batch before writing, blocks unsafe output, records generation provenance and examples, runs a static quality gate, and requires exact one-time user approval before generated content can become trusted. A real `qwen2.5:14b` generation produced and passed static evaluation for `audit-citations-minimal-handoff`; it remains an untrusted draft.
+- Semantic skill learning loop with declared capability contracts, bounded local-model scoring, findings-driven revision, versioned rollback copies, evaluation invalidation after changes, and user-controlled promotion. The real citation skill progressed from 4/10 with an invented database dependency to a grounded version 0.5.0 scoring 10/10 with `qwen2.5-coder:14b`; it remains a draft awaiting human review.
+- Citation-grounded research ledger with public-HTTPS/SSRF controls, redirect rejection, source size limits, source-aware stable fingerprints, transport hashes, change detection, instruction-risk signals, discarded remote bodies, and compact `citation-handoff-v1` packages. GitHub repository sources use official stable metadata and generic HTML excludes dynamic script/style markup. Live repeat verification passed for Orchestra Research, Addy Osmani Web Quality, and VoltAgent with zero false change alerts.
+- Bounded Aider adapter for local Ollama or OmniRoute with profile-routed context, shared prohibited-model enforcement, dry-run default, analytics/auto-commit/repo-map disabled, and history isolated under `.agent/audit/`.
+- Persistent zero-completion maintenance coordinator with safe local defaults, opt-in provider/citation probes, non-blocking project locking, bounded work per run, exponential failure backoff, portable scheduler instructions, emergency-stop enforcement, and hard-disabled scheduled model completions. A real six-job pass completed with all jobs passing and zero completion tokens.
+- Longitudinal evaluation regression alerts detect pass-to-fail changes, material quality drops, and token growth, with stable alert IDs and a persistent audit artifact.
+- Consent-aware cross-project learning library with private project candidates, exact one-time export/delete approvals, mandatory user-supplied sanitized abstractions, secret/private-material rejection, 0600 local storage, deterministic compact search, future-project context injection, and bootstrap guidance. Raw lesson details and project identity are never exported.
+- Execution governor with persistent ordered stages (Ollama, FreeBuff, OmniRoute, final-review, primary-review), slot reservation for final-review routes, durable asynchronous dispatch IDs, authenticated verified-result recording, idempotent replay, timeout fallback, skip-cascade on ordinary-stage pass, failure-continues-fallback on fail/skip, claim-time model-policy/provider-health/capacity revalidation, bounded evidence, safe artifact paths, stale lease recovery, and no secret fields persisted. 37 focused tests verify the lifecycle.
+- Bounded supervisor CLI and runtime loop that only isolates stale execution recovery and writes executor tickets, explicitly preventing any automatic model calls, stage claiming, or policy approval.
+- Full local regression evidence: 239 unit tests pass, the complete source/test tree compiles, and `git diff --check` reports no whitespace errors.
 
 ### Still required before production readiness
 
-- Verified live provider catalog/discovery, quota/budget enforcement, streaming/failover, and real provider quality evaluation.
+- Provider-specific account/quota endpoints where officially available and broader calibrated semantic/code benchmarks.
 - OS-keychain integrations, profile/account registry, full browser session persistence/manual takeover, and duplicate-submission recovery.
-- Research citations and prompt-injection defenses; trusted skill signing/provenance and a real evaluator/promotion workflow.
-- Proper git worktree isolation, review/commit/PR adapters, background scheduler/worker daemon, and structured telemetry/incident tooling.
+- Cryptographic signing for trusted skills, isolated forward-testing on real tasks, and calibrated multi-model semantic evaluation.
+- Review/commit/PR adapters, an always-on scheduler/worker service, and structured telemetry/incident tooling.
 - Official or authorized connectors for VS Code, Antigravity, Claude Code, Canva, Adobe, Lovable, and any other subscription service.
 - Multi-user isolation, installer/release flow, end-to-end evaluation suite, and production security review.

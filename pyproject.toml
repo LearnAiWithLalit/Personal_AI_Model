@@ -19,3 +19,6 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+guardian_agent = ["builtin_skills/*/SKILL.md", "builtin_skills/*/agents/openai.yaml"]

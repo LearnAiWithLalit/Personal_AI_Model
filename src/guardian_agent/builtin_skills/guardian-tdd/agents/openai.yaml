@@ -1,0 +1,4 @@
+interface:
+  display_name: "Guardian TDD"
+  short_description: "Implement changes with red-green-refactor"
+  default_prompt: "Use $guardian-tdd to implement this behavior with a red-green-refactor cycle."

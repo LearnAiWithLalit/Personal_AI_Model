@@ -34,3 +34,7 @@ htmlcov/
 # Guardian agent temporary test runs
 .agent/
 *.log
+.env*
+.aider*
+*.tmp
+vault*

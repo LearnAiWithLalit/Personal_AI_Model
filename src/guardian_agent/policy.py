@@ -1,15 +1,20 @@
-"""Policy-as-Code Engine & Approval Queue (Phase G0).
+"""Policy-as-Code Engine & Approval Queue (Phase 5 Hardened).
 
 Provides policy evaluation, permission boundary checks, approval queue management,
-and human checkpoint enforcement for sensitive or irreversible actions.
+atomic queue locking, evidence tracking, and human checkpoint enforcement.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import uuid
 from pathlib import Path
-from guardian_agent.core import GuardianError, ProjectBrain, append_journey, now_utc, markdown_escape
+from typing import Any
+
+from guardian_agent.core import GuardianError, ProjectBrain, append_journey, markdown_escape, now_utc
+from guardian_agent.security_url import sanitize_url_for_audit
 
 
 POLICY_FILE = "policy.json"
@@ -31,11 +36,25 @@ def default_policy() -> dict:
                 "irreversible_git_push",
                 "create_external_account",
                 "browser_submit",
+                "browser_publish",
+                "browser_purchase",
+                "browser_delete",
+                "browser_create_account",
+                "browser_accept_terms",
+                "browser_identity_verification",
+                "browser_fill_credential",
                 "accept_legal_terms",
                 "identity_verification",
                 "captcha_or_mfa_bypass",
                 "mcp_trust_server",
                 "mcp_write_tool",
+                "workflow_design_approval",
+                "workflow_final_approval",
+                "skill_import_accept",
+                "skill_generated_promote",
+                "runtime_resume",
+                "learning_export",
+                "learning_delete",
             ],
         },
     }
@@ -59,11 +78,11 @@ def get_policy(brain: ProjectBrain) -> dict:
 def check_policy_permission(brain: ProjectBrain, action: str, target: str) -> str:
     clean_action = markdown_escape(action)
     policy_data = get_policy(brain)["policy"]
-    
+
     requires_approval = policy_data.get("require_approval_for", [])
     if clean_action in requires_approval:
         return "requires_approval"
-        
+
     return "permitted"
 
 
@@ -73,81 +92,254 @@ def approval_queue_path(brain: ProjectBrain) -> Path:
     return audit_d / APPROVAL_QUEUE_FILE
 
 
+def _lock_file_path(brain: ProjectBrain) -> Path:
+    audit_d = brain.directory / "audit"
+    audit_d.mkdir(exist_ok=True)
+    return audit_d / "approval_queue.lock"
+
+
+def load_approval_queue(brain: ProjectBrain) -> list[dict[str, Any]]:
+    p = approval_queue_path(brain)
+    if not p.is_file():
+        return []
+    entries = []
+    lock_path = _lock_file_path(brain)
+    with open(lock_path, "a", encoding="utf-8") as lock_fd:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_SH)
+        try:
+            with open(p, "r", encoding="utf-8") as h:
+                for line in h.read().splitlines():
+                    if line.strip():
+                        try:
+                            entries.append(json.loads(line))
+                        except Exception:
+                            pass
+        finally:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+    return entries
+
+
 def request_action_approval(
     brain: ProjectBrain,
     action: str,
     target: str,
     reason: str,
-) -> dict:
+    *,
+    user_id: str = "user_default",
+    account_id: str | None = None,
+    connector_scope: str | None = None,
+    idempotency_key: str | None = None,
+    before_evidence: str | None = None,
+    expires_at: str | None = None,
+) -> dict[str, Any]:
+    """Request approval with user identity, connector scope, idempotency, evidence, and atomic locking."""
     clean_act = markdown_escape(action)
-    clean_tgt = markdown_escape(target)
+    clean_tgt = sanitize_url_for_audit(target)
     clean_rsn = markdown_escape(reason)
-    
+
     req_id = f"req-{uuid.uuid4().hex[:8]}"
     entry = {
         "id": req_id,
         "timestamp": now_utc(),
+        "expires_at": expires_at,
+        "user_id": user_id,
+        "account_id": account_id,
+        "connector_scope": connector_scope,
         "action": clean_act,
-        "target": clean_tgt,
+        "target": target,
+        "canonical_target": clean_tgt,
         "reason": clean_rsn,
+        "idempotency_key": idempotency_key or req_id,
+        "before_evidence": before_evidence,
+        "after_evidence": None,
         "status": "pending",
     }
-    
-    with approval_queue_path(brain).open("a", encoding="utf-8") as h:
-        h.write(json.dumps(entry) + "\n")
-        
-    append_journey(brain, f"Approval Requested: {clean_act}", [f"Target: {clean_tgt}", f"Reason: {clean_rsn}"])
+
+    lock_path = _lock_file_path(brain)
+    with open(lock_path, "a", encoding="utf-8") as lock_fd:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+        try:
+            q_path = approval_queue_path(brain)
+            with open(q_path, "a", encoding="utf-8") as h:
+                h.write(json.dumps(entry) + "\n")
+                h.flush()
+        finally:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+
+    append_journey(brain, f"Approval Requested: {clean_act}", [f"Target: {clean_tgt}", f"User: {user_id}"])
     return entry
 
 
-def load_approval_queue(brain: ProjectBrain) -> list[dict]:
-    p = approval_queue_path(brain)
-    if not p.is_file():
-        return []
-    entries = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        if line.strip():
+def approve_action_request(brain: ProjectBrain, request_id: str) -> dict[str, Any]:
+    """Approve an action request under exclusive queue lock with atomic rewrite."""
+    lock_path = _lock_file_path(brain)
+    with open(lock_path, "a", encoding="utf-8") as lock_fd:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+        try:
+            q_path = approval_queue_path(brain)
+            entries = []
+            if q_path.is_file():
+                for line in q_path.read_text(encoding="utf-8").splitlines():
+                    if line.strip():
+                        try:
+                            entries.append(json.loads(line))
+                        except Exception:
+                            pass
+            req = next((e for e in entries if e["id"] == request_id), None)
+            if not req:
+                raise GuardianError(f"Approval request {request_id!r} not found.")
+
+            req["status"] = "approved"
+            req["approved_at"] = now_utc()
+
+            tmp = q_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
+            with open(tmp, "w", encoding="utf-8") as fh:
+                try:
+                    os.chmod(tmp, 0o600)
+                except OSError:
+                    pass
+                for e in entries:
+                    fh.write(json.dumps(e) + "\n")
+                fh.flush()
+            tmp.replace(q_path)
             try:
-                entries.append(json.loads(line))
-            except Exception:
+                os.chmod(q_path, 0o600)
+            except OSError:
                 pass
-    return entries
+        finally:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
 
-
-def approve_action_request(brain: ProjectBrain, request_id: str) -> dict:
-    entries = load_approval_queue(brain)
-    req = next((e for e in entries if e["id"] == request_id), None)
-    if not req:
-        raise GuardianError(f"Approval request {request_id!r} not found.")
-        
-    req["status"] = "approved"
-    req["approved_at"] = now_utc()
-    
-    # Write back full queue
-    with approval_queue_path(brain).open("w", encoding="utf-8") as h:
-        for e in entries:
-            h.write(json.dumps(e) + "\n")
-            
     append_journey(brain, f"Action Approved: {req['action']}", [f"Request ID: {request_id}"])
     return req
 
 
-def consume_action_approval(brain: ProjectBrain, request_id: str, action: str, target: str) -> dict:
-    """Consume one approved request for its exact action and target."""
-    entries = load_approval_queue(brain)
-    request = next((entry for entry in entries if entry["id"] == request_id), None)
-    if not request:
-        raise GuardianError(f"Approval request {request_id!r} not found.")
+def consume_action_approval(
+    brain: ProjectBrain,
+    request_id: str,
+    action: str,
+    target: str,
+    after_evidence: str | None = None,
+    user_id: str | None = None,
+    account_id: str | None = None,
+    connector_scope: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """Consume one approved request atomically under exclusive queue lock with full target/scope verification."""
     clean_action = markdown_escape(action)
-    clean_target = markdown_escape(target)
-    if request.get("status") != "approved":
-        raise GuardianError(f"Approval request {request_id!r} is not approved.")
-    if request.get("action") != clean_action or request.get("target") != clean_target:
-        raise GuardianError("Approval request does not match this action and target.")
-    request["status"] = "consumed"
-    request["consumed_at"] = now_utc()
-    with approval_queue_path(brain).open("w", encoding="utf-8") as handle:
-        for entry in entries:
-            handle.write(json.dumps(entry) + "\n")
+    clean_target = sanitize_url_for_audit(target)
+
+    lock_path = _lock_file_path(brain)
+    with open(lock_path, "a", encoding="utf-8") as lock_fd:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+        try:
+            q_path = approval_queue_path(brain)
+            entries = []
+            if q_path.is_file():
+                for line in q_path.read_text(encoding="utf-8").splitlines():
+                    if line.strip():
+                        try:
+                            entries.append(json.loads(line))
+                        except Exception:
+                            pass
+            request = next((entry for entry in entries if entry["id"] == request_id), None)
+            if not request:
+                raise GuardianError(f"Approval request {request_id!r} not found.")
+
+            if request.get("status") != "approved":
+                raise GuardianError(f"Approval request {request_id!r} is in status {request.get('status')!r}, not 'approved'.")
+
+            # Expiry validation
+            expires_at = request.get("expires_at")
+            if expires_at and expires_at <= now_utc():
+                request["status"] = "expired"
+                _rewrite_queue_under_lock(q_path, entries)
+                raise GuardianError(f"Approval request {request_id!r} has expired.")
+
+            # Action validation
+            if request.get("action") != clean_action:
+                raise GuardianError(
+                    f"Approval request action {request.get('action')!r} does not match requested action {clean_action!r}."
+                )
+
+            # Canonical Target validation (CRITICAL FIX)
+            req_canonical = request.get("canonical_target") or sanitize_url_for_audit(request.get("target", ""))
+            if req_canonical and req_canonical != clean_target and request.get("target") != target:
+                raise GuardianError(
+                    f"Approval target mismatch: approval was granted for target {req_canonical!r}, "
+                    f"cannot be consumed for target {clean_target!r}."
+                )
+
+            # User ID validation
+            if user_id and request.get("user_id") and request.get("user_id") != user_id:
+                raise GuardianError(f"Approval user ID mismatch: expected {user_id!r}, got {request.get('user_id')!r}.")
+
+            # Account ID validation
+            if account_id and request.get("account_id") and request.get("account_id") != account_id:
+                raise GuardianError(f"Approval account ID mismatch: expected {account_id!r}, got {request.get('account_id')!r}.")
+
+            # Connector scope validation
+            if connector_scope and request.get("connector_scope") and request.get("connector_scope") != connector_scope:
+                raise GuardianError(f"Approval connector scope mismatch: expected {connector_scope!r}, got {request.get('connector_scope')!r}.")
+
+            # Idempotency key validation
+            if idempotency_key and request.get("idempotency_key") and request.get("idempotency_key") != idempotency_key:
+                raise GuardianError(f"Approval idempotency key mismatch: expected {idempotency_key!r}, got {request.get('idempotency_key')!r}.")
+
+            request["status"] = "consumed"
+            request["consumed_at"] = now_utc()
+            if after_evidence:
+                request["after_evidence"] = after_evidence
+
+            _rewrite_queue_under_lock(q_path, entries)
+        finally:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+
     append_journey(brain, f"Approval Consumed: {clean_action}", [f"Request ID: {request_id}"])
     return request
+
+
+def mark_approval_unknown_outcome(brain: ProjectBrain, request_id: str, error_reason: str) -> dict[str, Any]:
+    """Mark an approval request as unknown_outcome after a browser crash."""
+    lock_path = _lock_file_path(brain)
+    with open(lock_path, "a", encoding="utf-8") as lock_fd:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+        try:
+            q_path = approval_queue_path(brain)
+            entries = []
+            if q_path.is_file():
+                for line in q_path.read_text(encoding="utf-8").splitlines():
+                    if line.strip():
+                        try:
+                            entries.append(json.loads(line))
+                        except Exception:
+                            pass
+            request = next((entry for entry in entries if entry["id"] == request_id), None)
+            if not request:
+                raise GuardianError(f"Approval request {request_id!r} not found.")
+
+            request["status"] = "unknown_outcome"
+            request["error_reason"] = error_reason
+            request["updated_at"] = now_utc()
+
+            _rewrite_queue_under_lock(q_path, entries)
+        finally:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+
+    return request
+
+
+def _rewrite_queue_under_lock(q_path: Path, entries: list[dict[str, Any]]) -> None:
+    tmp = q_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        for entry in entries:
+            fh.write(json.dumps(entry) + "\n")
+        fh.flush()
+    tmp.replace(q_path)
+    try:
+        os.chmod(q_path, 0o600)
+    except OSError:
+        pass

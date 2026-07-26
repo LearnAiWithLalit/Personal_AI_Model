@@ -158,22 +158,50 @@ def _pending_request(brain: ProjectBrain) -> str | None:
     return None
 
 
-def confirm(brain: ProjectBrain, summary: str) -> None:
+def confirm(
+    brain: ProjectBrain,
+    summary: str,
+    *,
+    reference_id: str | None = None,
+    original_request: str | None = None,
+) -> None:
     clean_summary = markdown_escape(summary)
     if not clean_summary:
         raise GuardianError("A non-empty confirmed summary is required.")
-    pending = _pending_request(brain)
+    clean_reference = markdown_escape(reference_id or "")
+    clean_original = markdown_escape(original_request or "")
     requirements = brain.document("REQUIREMENTS.md")
-    replace_pending_requirement(brain, "_No pending requirements._")
-    with requirements.open("a", encoding="utf-8") as handle:
-        handle.write(
-            f"\n\n## Confirmed — {now_utc()}\n\n"
-            f"- **Summary:** {clean_summary}\n"
-            f"- **Original request:** {pending or 'Not recorded'}\n"
-            "- **Status:** Approved for planning and implementation.\n"
-        )
-    with brain.document("PLAN.md").open("a", encoding="utf-8") as handle:
-        handle.write(f"\n\n- [ ] {clean_summary}\n")
+    requirements_text = requirements.read_text(encoding="utf-8")
+    reference_marker = (
+        f"- **Reference ID:** {clean_reference}" if clean_reference else ""
+    )
+    plan_marker = f"<!-- guardian-reference:{clean_reference} -->" if clean_reference else ""
+    already_confirmed = bool(reference_marker and reference_marker in requirements_text)
+
+    if not clean_original:
+        clean_original = _pending_request(brain) or "Not recorded"
+        replace_pending_requirement(brain, "_No pending requirements._")
+
+    if not already_confirmed:
+        reference_line = f"- **Reference ID:** {clean_reference}\n" if clean_reference else ""
+        with requirements.open("a", encoding="utf-8") as handle:
+            handle.write(
+                f"\n\n## Confirmed — {now_utc()}\n\n"
+                f"{reference_line}"
+                f"- **Summary:** {clean_summary}\n"
+                f"- **Original request:** {clean_original}\n"
+                "- **Status:** Approved for planning and implementation.\n"
+            )
+
+    plan = brain.document("PLAN.md")
+    plan_text = plan.read_text(encoding="utf-8")
+    if not plan_marker or plan_marker not in plan_text:
+        marker_suffix = f" {plan_marker}" if plan_marker else ""
+        with plan.open("a", encoding="utf-8") as handle:
+            handle.write(f"\n\n- [ ] {clean_summary}{marker_suffix}\n")
+
+    if already_confirmed:
+        return
     append_journey(
         brain,
         "Requirement confirmed",
@@ -210,6 +238,12 @@ def render_context(brain: ProjectBrain) -> str:
     plan = brain.document("PLAN.md").read_text(encoding="utf-8").strip()
     decisions = _tail_sections(brain.document("DECISIONS.md").read_text(encoding="utf-8"), 3)
     lessons = _tail_sections(brain.document("LESSONS.md").read_text(encoding="utf-8"), 5)
+    reusable_path = brain.directory / "research" / "REUSABLE_LESSONS.md"
+    reusable_lessons = (
+        reusable_path.read_text(encoding="utf-8").strip()
+        if reusable_path.is_file()
+        else ""
+    )
     context = (
         "# Guardian Handoff Context\n\n"
         "Use this document as project context. Follow confirmed requirements and do not expose secrets.\n\n"
@@ -217,7 +251,8 @@ def render_context(brain: ProjectBrain) -> str:
         f"{requirements}\n\n"
         f"{plan}\n\n"
         f"{decisions}\n\n"
-        f"{lessons}\n"
+        f"{lessons}\n\n"
+        f"{reusable_lessons}\n"
     )
     brain.document("CONTEXT.md").write_text(context, encoding="utf-8")
     return context
