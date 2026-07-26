@@ -208,9 +208,6 @@ def _get_project_context(brain: ProjectBrain, task_summary: str = "", stage_allo
             continue
         filtered_paths.append(clean_p)
 
-    if not filtered_paths:
-        filtered_paths = ["src/", "tests/"]
-
     return {
         "requirements": confirmed_reqs,
         "acceptance_criteria": [
@@ -222,6 +219,7 @@ def _get_project_context(brain: ProjectBrain, task_summary: str = "", stage_allo
         ],
         "allowed_paths": filtered_paths,
     }
+
 
 
 def _validate_verification_results(verification_results: list[dict[str, Any]] | None) -> None:

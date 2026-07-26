@@ -123,6 +123,86 @@ def load_approval_queue(brain: ProjectBrain) -> list[dict[str, Any]]:
     return entries
 
 
+def _validate_approval_scope(
+    request: dict[str, Any],
+    action: str,
+    target: str,
+    *,
+    user_id: str | None = None,
+    account_id: str | None = None,
+    connector_scope: str | None = None,
+    idempotency_key: str | None = None,
+    reservation_token: str | None = None,
+    require_token: bool = False,
+) -> None:
+    """Shared exact-scope validator used by reservation and consumption."""
+    clean_action = markdown_escape(action)
+    clean_target = sanitize_url_for_audit(target)
+    is_sensitive = clean_action in _SENSITIVE_ACTIONS
+
+    # Action validation
+    if request.get("action") != clean_action:
+        raise GuardianError(
+            f"Approval action mismatch: expected {clean_action!r}, got {request.get('action')!r}."
+        )
+
+    # Target validation
+    req_canonical = request.get("canonical_target") or sanitize_url_for_audit(request.get("target", ""))
+    if req_canonical and req_canonical != clean_target and request.get("target") != target:
+        raise GuardianError(
+            f"Approval target mismatch: approval was granted for target {req_canonical!r}, "
+            f"cannot be used for target {clean_target!r}."
+        )
+
+    # Expiry validation
+    expires_at = request.get("expires_at")
+    if expires_at and expires_at <= now_utc():
+        raise GuardianError(f"Approval request {request.get('id')!r} has expired.")
+
+    # Scope validation
+    req_user = request.get("user_id")
+    req_acc = request.get("account_id")
+    req_scope = request.get("connector_scope")
+
+    eff_user = user_id or "user_default"
+
+    if is_sensitive:
+        if not req_user or req_user != eff_user:
+            raise GuardianError(
+                f"Security violation: approval {request.get('id')!r} lacks or has mismatched mandatory user_id scope for sensitive action {clean_action!r}."
+            )
+        if (account_id or req_acc) and (not req_acc or not account_id or req_acc != account_id):
+            raise GuardianError(
+                f"Security violation: approval {request.get('id')!r} lacks or has mismatched mandatory account_id scope for sensitive action {clean_action!r}."
+            )
+        if (connector_scope or req_scope) and (not req_scope or not connector_scope or req_scope != connector_scope):
+            raise GuardianError(
+                f"Security violation: approval {request.get('id')!r} lacks or has mismatched mandatory connector_scope for sensitive action {clean_action!r}."
+            )
+
+    else:
+        if user_id and req_user and req_user != eff_user:
+            raise GuardianError(f"Approval user ID mismatch: expected {eff_user!r}, got {req_user!r}.")
+
+        if account_id and req_acc and req_acc != account_id:
+            raise GuardianError(f"Approval account ID mismatch: expected {account_id!r}, got {req_acc!r}.")
+        if connector_scope and req_scope and req_scope != connector_scope:
+            raise GuardianError(f"Approval connector scope mismatch: expected {connector_scope!r}, got {req_scope!r}.")
+
+    # Idempotency key validation
+    req_idem = request.get("idempotency_key")
+    if idempotency_key and req_idem and req_idem != idempotency_key:
+        raise GuardianError(f"Approval idempotency key mismatch: expected {idempotency_key!r}, got {req_idem!r}.")
+
+    # Token validation
+    if require_token:
+        stored_token = request.get("reservation_token")
+        if not reservation_token or not stored_token or stored_token != reservation_token:
+            raise GuardianError(
+                f"Security violation: reserved approval {request.get('id')!r} requires a valid matching reservation token to be processed."
+            )
+
+
 def request_action_approval(
     brain: ProjectBrain,
     action: str,
@@ -180,7 +260,6 @@ def approve_action_request(brain: ProjectBrain, request_id: str) -> dict[str, An
 
     Guarantees one-time approval lifecycle: only 'pending' requests can be approved.
     """
-
     lock_path = _lock_file_path(brain)
     with open(lock_path, "a", encoding="utf-8") as lock_fd:
         fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
@@ -224,10 +303,6 @@ def reserve_action_approval(
 
     Generates a secret reservation_token. Only an 'approved' request can be reserved.
     """
-
-    clean_action = markdown_escape(action)
-    clean_target = sanitize_url_for_audit(target)
-
     lock_path = _lock_file_path(brain)
     with open(lock_path, "a", encoding="utf-8") as lock_fd:
         fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
@@ -248,49 +323,16 @@ def reserve_action_approval(
             if st != "approved":
                 raise GuardianError(f"Approval request {request_id!r} is in status {st!r}, not 'approved'.")
 
-            # Expiry validation
-            expires_at = request.get("expires_at")
-            if expires_at and expires_at <= now_utc():
-                request["status"] = "expired"
-                _rewrite_queue_under_lock(q_path, entries)
-                raise GuardianError(f"Approval request {request_id!r} has expired.")
-
-            # Action validation
-            if request.get("action") != clean_action:
-                raise GuardianError(
-                    f"Approval action mismatch: expected {clean_action!r}, got {request.get('action')!r}."
-                )
-
-            # Target validation
-            req_canonical = request.get("canonical_target") or sanitize_url_for_audit(request.get("target", ""))
-            if req_canonical and req_canonical != clean_target and request.get("target") != target:
-                raise GuardianError(
-                    f"Approval target mismatch: approval was granted for target {req_canonical!r}, "
-                    f"cannot be used for target {clean_target!r}."
-                )
-
-            # Strict Scope Validation (Sensitive Action No-Wildcard Rule)
-            is_sensitive = clean_action in _SENSITIVE_ACTIONS
-
-            req_user = request.get("user_id")
-            if user_id and req_user and req_user != user_id:
-                raise GuardianError(f"Approval user ID mismatch: expected {user_id!r}, got {req_user!r}.")
-
-            req_acc = request.get("account_id")
-            if is_sensitive and account_id and not req_acc:
-                raise GuardianError(f"Security violation: approval {request_id!r} lacks mandatory account_id scope for sensitive action {clean_action!r}.")
-            if account_id and req_acc and req_acc != account_id:
-                raise GuardianError(f"Approval account ID mismatch: expected {account_id!r}, got {req_acc!r}.")
-
-            req_scope = request.get("connector_scope")
-            if is_sensitive and connector_scope and not req_scope:
-                raise GuardianError(f"Security violation: approval {request_id!r} lacks mandatory connector_scope for sensitive action {clean_action!r}.")
-            if connector_scope and req_scope and req_scope != connector_scope:
-                raise GuardianError(f"Approval connector scope mismatch: expected {connector_scope!r}, got {req_scope!r}.")
-
-            req_idem = request.get("idempotency_key")
-            if idempotency_key and req_idem and req_idem != idempotency_key:
-                raise GuardianError(f"Approval idempotency key mismatch: expected {idempotency_key!r}, got {req_idem!r}.")
+            _validate_approval_scope(
+                request,
+                action,
+                target,
+                user_id=user_id,
+                account_id=account_id,
+                connector_scope=connector_scope,
+                idempotency_key=idempotency_key,
+                require_token=False,
+            )
 
             token = f"tok-{uuid.uuid4().hex[:12]}"
             request["status"] = "reserved"
@@ -332,8 +374,17 @@ def consume_action_approval(
             if st not in ("approved", "reserved"):
                 raise GuardianError(f"Approval request {request_id!r} is in status {st!r}, cannot be consumed.")
 
-            if st == "reserved" and reservation_token and request.get("reservation_token") != reservation_token:
-                raise GuardianError(f"Reservation token mismatch for approval request {request_id!r}.")
+            _validate_approval_scope(
+                request,
+                action,
+                target,
+                user_id=user_id,
+                account_id=account_id,
+                connector_scope=connector_scope,
+                idempotency_key=idempotency_key,
+                reservation_token=reservation_token,
+                require_token=(st == "reserved"),
+            )
 
             request["status"] = "consumed"
             request["consumed_at"] = now_utc()
@@ -352,6 +403,8 @@ def mark_approval_unknown_outcome(
     brain: ProjectBrain,
     request_id: str,
     error_reason: str,
+    action: str | None = None,
+    target: str | None = None,
     reservation_token: str | None = None,
 ) -> dict[str, Any]:
     """Mark an approval request as unknown_outcome after an interrupted action."""
@@ -365,7 +418,16 @@ def mark_approval_unknown_outcome(
             if not request:
                 raise GuardianError(f"Approval request {request_id!r} not found.")
 
-            if reservation_token and request.get("reservation_token") != reservation_token:
+            st = request.get("status")
+            if action and target:
+                _validate_approval_scope(
+                    request,
+                    action,
+                    target,
+                    reservation_token=reservation_token,
+                    require_token=(st == "reserved"),
+                )
+            elif st == "reserved" and reservation_token and request.get("reservation_token") != reservation_token:
                 raise GuardianError(f"Reservation token mismatch for approval request {request_id!r}.")
 
             request["status"] = "unknown_outcome"

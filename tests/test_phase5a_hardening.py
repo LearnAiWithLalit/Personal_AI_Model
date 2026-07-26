@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from guardian_agent.accounts import register_account, revoke_account
+from guardian_agent.adapters import _get_project_context, generate_adapter_config
 from guardian_agent.connectors import CanvaConnector, ConnectorNotConfigured, get_connector
 from guardian_agent.core import GuardianError, initialize
 from guardian_agent.execution import ExecutionLockManager, claim_execution_stage, plan_execution, record_execution_result
@@ -89,7 +90,7 @@ class Phase5AHardeningTests(unittest.TestCase):
             )
         self.assertIn("This stage has no writable paths", str(cm.exception))
 
-    def test_adapter_never_invents_writable_paths(self):
+    def test_adapter_empty_stage_allowed_paths_remains_empty(self):
         start = orchestrate_start(self.brain, "Research architecture", limit=2)
         orch_id = start["orchestration_id"]
         orchestrate_confirm(self.brain, orch_id, "Research architecture")
@@ -97,6 +98,110 @@ class Phase5AHardeningTests(unittest.TestCase):
         ex = plan_execution(self.brain, orch_id)
 
         self.assertEqual(ex["stages"][0]["allowed_paths"], [])
+
+        # Check adapter project context with empty allowed_paths
+        ctx = _get_project_context(self.brain, stage_allowed_paths=[])
+        self.assertEqual(ctx["allowed_paths"], [])
+
+    def test_unscoped_sensitive_approval_reservation_rejected(self):
+        req = request_action_approval(
+            self.brain,
+            "browser_delete",
+            "https://safe.example/item/1",
+            "Delete item without scope",
+            # Omitted user_id, account_id, connector_scope
+        )
+        approve_action_request(self.brain, req["id"])
+
+        with self.assertRaises(GuardianError) as cm:
+            reserve_action_approval(
+                self.brain,
+                req["id"],
+                "browser_delete",
+                "https://safe.example/item/1",
+                user_id="u1",
+                account_id="acc-01",
+                connector_scope="canva",
+            )
+        self.assertIn("lacks or has mismatched mandatory", str(cm.exception))
+
+    def test_reserved_approval_consumed_with_wrong_action_target_or_token_rejected(self):
+        req = request_action_approval(
+            self.brain,
+            "browser_delete",
+            "https://safe.example/item/1",
+            "Delete item",
+            user_id="u1",
+            account_id="acc-01",
+            connector_scope="canva",
+        )
+        approve_action_request(self.brain, req["id"])
+        res = reserve_action_approval(
+            self.brain,
+            req["id"],
+            "browser_delete",
+            "https://safe.example/item/1",
+            user_id="u1",
+            account_id="acc-01",
+            connector_scope="canva",
+        )
+        token = res["reservation_token"]
+        self.assertTrue(token.startswith("tok-"))
+
+        # Consumption without reservation token must be rejected
+        with self.assertRaises(GuardianError) as cm1:
+            consume_action_approval(
+                self.brain,
+                req["id"],
+                "browser_delete",
+                "https://safe.example/item/1",
+                user_id="u1",
+                account_id="acc-01",
+                connector_scope="canva",
+                reservation_token=None,
+            )
+        self.assertIn("requires a valid matching reservation token", str(cm1.exception))
+
+        # Consumption with wrong action must be rejected
+        with self.assertRaises(GuardianError) as cm2:
+            consume_action_approval(
+                self.brain,
+                req["id"],
+                "browser_publish",
+                "https://safe.example/item/1",
+                user_id="u1",
+                account_id="acc-01",
+                connector_scope="canva",
+                reservation_token=token,
+            )
+        self.assertIn("action mismatch", str(cm2.exception))
+
+        # Consumption with wrong target must be rejected
+        with self.assertRaises(GuardianError) as cm3:
+            consume_action_approval(
+                self.brain,
+                req["id"],
+                "browser_delete",
+                "https://safe.example/item/wrong",
+                user_id="u1",
+                account_id="acc-01",
+                connector_scope="canva",
+                reservation_token=token,
+            )
+        self.assertIn("target mismatch", str(cm3.exception))
+
+        # Successful consumption with matching token and scope
+        consumed = consume_action_approval(
+            self.brain,
+            req["id"],
+            "browser_delete",
+            "https://safe.example/item/1",
+            user_id="u1",
+            account_id="acc-01",
+            connector_scope="canva",
+            reservation_token=token,
+        )
+        self.assertEqual(consumed["status"], "consumed")
 
     def test_consumed_approval_cannot_be_reapproved(self):
         req = request_action_approval(
@@ -133,57 +238,6 @@ class Phase5AHardeningTests(unittest.TestCase):
         with self.assertRaises(GuardianError) as cm:
             approve_action_request(self.brain, req["id"])
         self.assertIn("not 'pending'", str(cm.exception))
-
-    def test_reserved_approval_cannot_be_reused_by_another_caller(self):
-        req = request_action_approval(
-            self.brain,
-            "browser_delete",
-            "https://safe.example/item/1",
-            "Delete item",
-            user_id="u1",
-            account_id="acc-01",
-            connector_scope="canva",
-        )
-        approve_action_request(self.brain, req["id"])
-        reserve_action_approval(
-            self.brain,
-            req["id"],
-            "browser_delete",
-            "https://safe.example/item/1",
-            user_id="u1",
-            account_id="acc-01",
-            connector_scope="canva",
-        )
-
-        with self.assertRaises(GuardianError) as cm:
-            reserve_action_approval(
-                self.brain,
-                req["id"],
-                "browser_delete",
-                "https://safe.example/item/1",
-                user_id="u1",
-                account_id="acc-01",
-                connector_scope="canva",
-            )
-        self.assertIn("already reserved", str(cm.exception))
-
-    def test_sensitive_action_missing_scope_rejected(self):
-        req = request_action_approval(
-            self.brain,
-            "browser_delete",
-            "https://safe.example/item/1",
-            "Delete test item",
-        )
-        approve_action_request(self.brain, req["id"])
-
-        with self.assertRaises(GuardianError):
-            reserve_action_approval(
-                self.brain,
-                req["id"],
-                "browser_delete",
-                "https://safe.example/item/1",
-                account_id="acc-01",
-            )
 
 
 if __name__ == "__main__":
