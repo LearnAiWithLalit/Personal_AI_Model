@@ -19,6 +19,7 @@ Guardian is designed to be the durable coordinator—not another model subscript
 | Browser operator | Inspects pages with Playwright or HTTP fallback; Playwright can perform visible, bounded navigate/click/fill/screenshot/submit actions. |
 | Sensitive actions | Uses policy checks and a one-time approval queue for browser submission, payments, deletion, irreversible pushes, account creation, legal acceptance, and identity checks. |
 | LLM Council | Optional multi-model deliberation: independent opinions, anonymized peer reviews, and a chairman synthesis for difficult analysis. |
+| Freebuff worker | Prepares compact coding handoffs and launches user-controlled Freebuff CLI sessions, helping reserve paid models for final review or difficult work. |
 
 ## How Guardian fits into a workflow
 
@@ -174,6 +175,27 @@ guardian council show
 ```
 
 Guardian writes the full deliberation record to `.agent/artifacts/` and a concise completion entry to the project journey. Failed council members are shown honestly; Guardian does not fabricate a consensus or a final answer when every member fails.
+
+## Freebuff token-saving coding worker
+
+[Freebuff](https://freebuff.com/) is an interactive coding CLI that currently advertises free coding sessions without user-supplied API keys. Guardian integrates it as an optional user-controlled worker—not as a hidden background provider. This lets Guardian preserve the project plan and give Freebuff a small, focused handoff instead of repeatedly spending tokens reconstructing context.
+
+```bash
+# Confirm that Freebuff is installed and available
+guardian freebuff status
+
+# Build a compact task and project-context file
+guardian freebuff prepare --task "Add tests for the model router"
+
+# Start Freebuff in the current project; ask it to read
+# .agent/research/FREEBUFF_HANDOFF.md
+guardian freebuff start
+
+# Continue a known Freebuff conversation later
+guardian freebuff start --continue <conversation-id>
+```
+
+Guardian does not log into Freebuff, collect its credentials, or bypass its usage limits. If Freebuff asks for login, complete that step directly in its visible terminal session. Its availability, model selection, limits, and terms are controlled by Freebuff and can change over time. [Freebuff’s site](https://freebuff.com/) describes its CLI as a free terminal coding agent; validate it against your own security and project requirements before using it for sensitive code.
 
 ## Skills and specialist handoffs
 

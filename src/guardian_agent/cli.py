@@ -34,6 +34,7 @@ from guardian_agent.workers import dispatch_worker, list_worker_roles
 from guardian_agent.export import export_handoff
 from guardian_agent.browser_operator import execute_browser_action, inspect_web_page
 from guardian_agent.council import configure_council, load_council, run_council
+from guardian_agent.freebuff import create_freebuff_handoff, freebuff_status, launch_freebuff
 
 # Phase G0 Imports
 from guardian_agent.runtime import enqueue_task, get_task_status, kill_switch, list_queued_tasks, recover_interrupted_tasks
@@ -192,6 +193,17 @@ def build_parser() -> argparse.ArgumentParser:
     council_config.add_argument("--chairman", help="Provider ID or provider:model route")
     council_show = council_sub.add_parser("show", help="Show council configuration")
     council_show.add_argument("--project", default=".", type=_project_path)
+
+    freebuff_p = subparsers.add_parser("freebuff", help="Prepare or launch a Freebuff coding session")
+    freebuff_sub = freebuff_p.add_subparsers(dest="freebuff_command", required=True)
+    freebuff_status_p = freebuff_sub.add_parser("status", help="Check whether the Freebuff CLI is available")
+    freebuff_status_p.add_argument("--project", default=".", type=_project_path)
+    freebuff_prepare = freebuff_sub.add_parser("prepare", help="Create a compact Freebuff coding handoff")
+    freebuff_prepare.add_argument("--project", default=".", type=_project_path)
+    freebuff_prepare.add_argument("--task", required=True)
+    freebuff_start = freebuff_sub.add_parser("start", help="Launch an interactive Freebuff session")
+    freebuff_start.add_argument("--project", default=".", type=_project_path)
+    freebuff_start.add_argument("--continue", dest="conversation_id", help="Continue a Freebuff conversation ID")
 
     # Run completion
     run_parser = subparsers.add_parser("run", help="Execute task completion using routed model")
@@ -359,6 +371,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(configure_council(brain, args.members, args.chairman), indent=2))
             elif args.council_command == "show":
                 print(json.dumps(load_council(brain), indent=2))
+            return 0
+
+        if args.command == "freebuff":
+            if args.freebuff_command == "status":
+                print(json.dumps(freebuff_status(), indent=2))
+            elif args.freebuff_command == "prepare":
+                print(json.dumps(create_freebuff_handoff(brain, args.task), indent=2))
+            elif args.freebuff_command == "start":
+                return launch_freebuff(brain, args.conversation_id)
             return 0
 
         if args.command == "run":
