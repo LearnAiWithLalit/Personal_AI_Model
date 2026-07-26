@@ -139,6 +139,7 @@ def _validate_approval_scope(
     clean_action = markdown_escape(action)
     clean_target = sanitize_url_for_audit(target)
     is_sensitive = clean_action in _SENSITIVE_ACTIONS
+    requires_external_scope = clean_action.startswith("browser_") or clean_action == "create_external_account"
 
     # Action validation
     if request.get("action") != clean_action:
@@ -171,13 +172,25 @@ def _validate_approval_scope(
             raise GuardianError(
                 f"Security violation: approval {request.get('id')!r} lacks or has mismatched mandatory user_id scope for sensitive action {clean_action!r}."
             )
-        if (account_id or req_acc) and (not req_acc or not account_id or req_acc != account_id):
+        if requires_external_scope and (not req_acc or not account_id or req_acc != account_id):
             raise GuardianError(
                 f"Security violation: approval {request.get('id')!r} lacks or has mismatched mandatory account_id scope for sensitive action {clean_action!r}."
             )
-        if (connector_scope or req_scope) and (not req_scope or not connector_scope or req_scope != connector_scope):
+        if not requires_external_scope and (account_id or req_acc) and (
+            not req_acc or not account_id or req_acc != account_id
+        ):
+            raise GuardianError(
+                f"Security violation: approval {request.get('id')!r} has mismatched account_id scope for sensitive action {clean_action!r}."
+            )
+        if requires_external_scope and (not req_scope or not connector_scope or req_scope != connector_scope):
             raise GuardianError(
                 f"Security violation: approval {request.get('id')!r} lacks or has mismatched mandatory connector_scope for sensitive action {clean_action!r}."
+            )
+        if not requires_external_scope and (connector_scope or req_scope) and (
+            not req_scope or not connector_scope or req_scope != connector_scope
+        ):
+            raise GuardianError(
+                f"Security violation: approval {request.get('id')!r} has mismatched connector_scope for sensitive action {clean_action!r}."
             )
 
     else:
@@ -419,16 +432,27 @@ def mark_approval_unknown_outcome(
                 raise GuardianError(f"Approval request {request_id!r} not found.")
 
             st = request.get("status")
+            if st != "reserved":
+                raise GuardianError(
+                    f"Approval request {request_id!r} is in status {st!r}, not 'reserved'; "
+                    "only an in-flight reserved action can have an unknown outcome."
+                )
+
             if action and target:
                 _validate_approval_scope(
                     request,
                     action,
                     target,
                     reservation_token=reservation_token,
-                    require_token=(st == "reserved"),
+                    require_token=True,
                 )
-            elif st == "reserved" and reservation_token and request.get("reservation_token") != reservation_token:
-                raise GuardianError(f"Reservation token mismatch for approval request {request_id!r}.")
+            else:
+                stored_token = request.get("reservation_token")
+                if not reservation_token or not stored_token or stored_token != reservation_token:
+                    raise GuardianError(
+                        f"Security violation: reserved approval {request_id!r} requires a valid matching "
+                        "reservation token before recording an unknown outcome."
+                    )
 
             request["status"] = "unknown_outcome"
             request["error_reason"] = error_reason

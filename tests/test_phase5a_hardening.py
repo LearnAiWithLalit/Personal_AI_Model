@@ -20,6 +20,7 @@ from guardian_agent.orchestration import (
 from guardian_agent.policy import (
     approve_action_request,
     consume_action_approval,
+    mark_approval_unknown_outcome,
     request_action_approval,
     reserve_action_approval,
 )
@@ -125,6 +126,24 @@ class Phase5AHardeningTests(unittest.TestCase):
             )
         self.assertIn("lacks or has mismatched mandatory", str(cm.exception))
 
+    def test_fully_unscoped_sensitive_browser_reservation_rejected(self):
+        req = request_action_approval(
+            self.brain,
+            "browser_delete",
+            "https://safe.example/item/1",
+            "Delete item without an account or connector scope",
+        )
+        approve_action_request(self.brain, req["id"])
+
+        with self.assertRaises(GuardianError) as cm:
+            reserve_action_approval(
+                self.brain,
+                req["id"],
+                "browser_delete",
+                "https://safe.example/item/1",
+            )
+        self.assertIn("mandatory account_id scope", str(cm.exception))
+
     def test_reserved_approval_consumed_with_wrong_action_target_or_token_rejected(self):
         req = request_action_approval(
             self.brain,
@@ -202,6 +221,45 @@ class Phase5AHardeningTests(unittest.TestCase):
             reservation_token=token,
         )
         self.assertEqual(consumed["status"], "consumed")
+
+    def test_reserved_approval_unknown_outcome_requires_matching_token(self):
+        req = request_action_approval(
+            self.brain,
+            "browser_delete",
+            "https://safe.example/item/1",
+            "Delete item",
+            user_id="u1",
+            account_id="acc-01",
+            connector_scope="canva",
+        )
+        approve_action_request(self.brain, req["id"])
+        reserved = reserve_action_approval(
+            self.brain,
+            req["id"],
+            "browser_delete",
+            "https://safe.example/item/1",
+            user_id="u1",
+            account_id="acc-01",
+            connector_scope="canva",
+        )
+
+        with self.assertRaises(GuardianError):
+            mark_approval_unknown_outcome(self.brain, req["id"], "Interrupted")
+        with self.assertRaises(GuardianError):
+            mark_approval_unknown_outcome(
+                self.brain,
+                req["id"],
+                "Interrupted",
+                reservation_token="tok-wrong",
+            )
+
+        unknown = mark_approval_unknown_outcome(
+            self.brain,
+            req["id"],
+            "Interrupted",
+            reservation_token=reserved["reservation_token"],
+        )
+        self.assertEqual(unknown["status"], "unknown_outcome")
 
     def test_consumed_approval_cannot_be_reapproved(self):
         req = request_action_approval(

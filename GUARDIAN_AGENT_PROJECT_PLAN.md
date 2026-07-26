@@ -829,7 +829,7 @@ User request
 - Consent-aware cross-project learning library with private project candidates, exact one-time export/delete approvals, mandatory user-supplied sanitized abstractions, secret/private-material rejection, 0600 local storage, deterministic compact search, future-project context injection, and bootstrap guidance. Raw lesson details and project identity are never exported.
 - Execution governor with persistent ordered stages (Ollama, FreeBuff, OmniRoute, final-review, primary-review), slot reservation for final-review routes, durable asynchronous dispatch IDs, authenticated verified-result recording, idempotent replay, timeout fallback, skip-cascade on ordinary-stage pass, failure-continues-fallback on fail/skip, claim-time model-policy/provider-health/capacity revalidation, bounded evidence, safe artifact paths, stale lease recovery, and no secret fields persisted. 37 focused tests verify the lifecycle.
 - Bounded supervisor CLI and runtime loop that only isolates stale execution recovery and writes executor tickets, explicitly preventing any automatic model calls, stage claiming, or policy approval.
-- Full local regression evidence: 239 unit tests pass, the complete source/test tree compiles, and `git diff --check` reports no whitespace errors.
+- Full local regression evidence: 290 unit tests pass, the complete source/test tree compiles, and `git diff --check` reports no whitespace errors.
 
 ### Still required before production readiness
 
