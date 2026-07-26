@@ -35,6 +35,14 @@ from guardian_agent.export import export_handoff
 from guardian_agent.browser_operator import execute_browser_action, inspect_web_page
 from guardian_agent.council import configure_council, load_council, run_council
 from guardian_agent.freebuff import create_freebuff_handoff, freebuff_status, launch_freebuff
+from guardian_agent.mcp import (
+    allow_mcp_tool,
+    call_mcp_tool,
+    discover_mcp_tools,
+    list_mcp_servers,
+    register_mcp_server,
+    trust_mcp_server,
+)
 
 # Phase G0 Imports
 from guardian_agent.runtime import enqueue_task, get_task_status, kill_switch, list_queued_tasks, recover_interrupted_tasks
@@ -204,6 +212,34 @@ def build_parser() -> argparse.ArgumentParser:
     freebuff_start = freebuff_sub.add_parser("start", help="Launch an interactive Freebuff session")
     freebuff_start.add_argument("--project", default=".", type=_project_path)
     freebuff_start.add_argument("--continue", dest="conversation_id", help="Continue a Freebuff conversation ID")
+
+    mcp_p = subparsers.add_parser("mcp", help="Manage allowlisted MCP stdio servers and tools")
+    mcp_sub = mcp_p.add_subparsers(dest="mcp_command", required=True)
+    mcp_add = mcp_sub.add_parser("add", help="Register an untrusted local stdio server")
+    mcp_add.add_argument("--project", default=".", type=_project_path)
+    mcp_add.add_argument("--id", required=True)
+    mcp_add.add_argument("--command", required=True)
+    mcp_add.add_argument("--arg", action="append", default=[])
+    mcp_list = mcp_sub.add_parser("list", help="List registered MCP servers")
+    mcp_list.add_argument("--project", default=".", type=_project_path)
+    mcp_trust = mcp_sub.add_parser("trust", help="Consume approval and trust one registered server command")
+    mcp_trust.add_argument("--project", default=".", type=_project_path)
+    mcp_trust.add_argument("--id", required=True)
+    mcp_trust.add_argument("--approval-id", required=True)
+    mcp_discover = mcp_sub.add_parser("discover", help="Discover tools from a trusted server")
+    mcp_discover.add_argument("--project", default=".", type=_project_path)
+    mcp_discover.add_argument("--id", required=True)
+    mcp_allow = mcp_sub.add_parser("allow", help="Allow one discovered tool as read or write")
+    mcp_allow.add_argument("--project", default=".", type=_project_path)
+    mcp_allow.add_argument("--id", required=True)
+    mcp_allow.add_argument("--tool", required=True)
+    mcp_allow.add_argument("--mode", choices=["read", "write"], required=True)
+    mcp_call = mcp_sub.add_parser("call", help="Call one allowlisted tool")
+    mcp_call.add_argument("--project", default=".", type=_project_path)
+    mcp_call.add_argument("--id", required=True)
+    mcp_call.add_argument("--tool", required=True)
+    mcp_call.add_argument("--arguments", default="{}", help="JSON object")
+    mcp_call.add_argument("--approval-id", help="Required for write-capable tools")
 
     # Run completion
     run_parser = subparsers.add_parser("run", help="Execute task completion using routed model")
@@ -380,6 +416,27 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(create_freebuff_handoff(brain, args.task), indent=2))
             elif args.freebuff_command == "start":
                 return launch_freebuff(brain, args.conversation_id)
+            return 0
+
+        if args.command == "mcp":
+            if args.mcp_command == "add":
+                print(json.dumps(register_mcp_server(brain, args.id, args.command, args.arg), indent=2))
+            elif args.mcp_command == "list":
+                print(json.dumps(list_mcp_servers(brain), indent=2))
+            elif args.mcp_command == "trust":
+                print(json.dumps(trust_mcp_server(brain, args.id, args.approval_id), indent=2))
+            elif args.mcp_command == "discover":
+                print(json.dumps(discover_mcp_tools(brain, args.id), indent=2))
+            elif args.mcp_command == "allow":
+                print(json.dumps(allow_mcp_tool(brain, args.id, args.tool, args.mode), indent=2))
+            elif args.mcp_command == "call":
+                try:
+                    arguments = json.loads(args.arguments)
+                except json.JSONDecodeError as error:
+                    raise GuardianError(f"MCP arguments must be valid JSON: {error}") from error
+                if not isinstance(arguments, dict):
+                    raise GuardianError("MCP arguments must be a JSON object.")
+                print(json.dumps(call_mcp_tool(brain, args.id, args.tool, arguments, args.approval_id), indent=2))
             return 0
 
         if args.command == "run":

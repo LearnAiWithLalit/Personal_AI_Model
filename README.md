@@ -20,6 +20,7 @@ Guardian is designed to be the durable coordinator—not another model subscript
 | Sensitive actions | Uses policy checks and a one-time approval queue for browser submission, payments, deletion, irreversible pushes, account creation, legal acceptance, and identity checks. |
 | LLM Council | Optional multi-model deliberation: independent opinions, anonymized peer reviews, and a chairman synthesis for difficult analysis. |
 | Freebuff worker | Prepares compact coding handoffs and launches user-controlled Freebuff CLI sessions, helping reserve paid models for final review or difficult work. |
+| Secure MCP tools | Registers local stdio MCP servers as untrusted, discovers tools after server approval, pins tool schemas, and gates write-capable calls with one-time approval. |
 
 ## How Guardian fits into a workflow
 
@@ -196,6 +197,48 @@ guardian freebuff start --continue <conversation-id>
 ```
 
 Guardian does not log into Freebuff, collect its credentials, or bypass its usage limits. If Freebuff asks for login, complete that step directly in its visible terminal session. Its availability, model selection, limits, and terms are controlled by Freebuff and can change over time. [Freebuff’s site](https://freebuff.com/) describes its CLI as a free terminal coding agent; validate it against your own security and project requirements before using it for sensitive code.
+
+## Secure MCP tool integration
+
+Guardian can act as a restricted host for local MCP servers using the stdio transport. Registration does not imply trust: a server command must receive a one-time approval before it can start, and every tool must be discovered and explicitly allowlisted as `read` or `write`. Guardian pins the discovered tool schema so a server cannot silently change an approved tool contract.
+
+```bash
+# Register only; this does not execute the server
+guardian mcp add \
+  --id my-server \
+  --command /absolute/path/to/server \
+  --arg first-server-argument
+
+# Approve and consume trust for this exact server ID
+guardian policy request \
+  --action mcp_trust_server \
+  --target my-server \
+  --reason "Reviewed this local MCP server command and source"
+guardian policy approve --id req-xxxxxxxx
+guardian mcp trust --id my-server --approval-id req-xxxxxxxx
+
+# Start the trusted server temporarily and inspect its tools
+guardian mcp discover --id my-server
+guardian mcp allow --id my-server --tool exact_tool_name --mode read
+guardian mcp call --id my-server --tool exact_tool_name --arguments '{"key":"value"}'
+```
+
+Write-capable tools require a separate one-time approval for the exact `server:tool` target:
+
+```bash
+guardian policy request \
+  --action mcp_write_tool \
+  --target my-server:write_tool \
+  --reason "Approve this single state-changing tool call"
+guardian policy approve --id req-yyyyyyyy
+guardian mcp call \
+  --id my-server \
+  --tool write_tool \
+  --arguments '{"key":"value"}' \
+  --approval-id req-yyyyyyyy
+```
+
+This first MCP layer supports local stdio servers and `tools/list` plus `tools/call`. Remote Streamable HTTP, OAuth, resources, prompts, notifications, and long-running MCP tasks remain planned. A trusted local MCP command runs with the operating-system permissions of the Guardian user, so review its source and arguments before approval.
 
 ## Skills and specialist handoffs
 

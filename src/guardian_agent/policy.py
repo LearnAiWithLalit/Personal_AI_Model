@@ -34,6 +34,8 @@ def default_policy() -> dict:
                 "accept_legal_terms",
                 "identity_verification",
                 "captcha_or_mfa_bypass",
+                "mcp_trust_server",
+                "mcp_write_tool",
             ],
         },
     }
