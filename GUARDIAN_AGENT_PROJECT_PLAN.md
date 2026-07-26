@@ -719,6 +719,7 @@ The system is not production-ready until it can demonstrate all of the following
 - Skill draft/promotion records, specialist-role handoff packages, task queue, locks, crash recovery, and emergency stop.
 - Approval queue with exact action/target, one-time approval consumption, coding verification without a shell, and sandbox-copy rollback support.
 - Browser inspection plus bounded Playwright navigate/click/fill/screenshot/submit actions. Submission is visible by default and policy-gated.
+- Opt-in LLM Council protocol for safe analysis: independent model opinions, anonymized peer review, chairman synthesis, and retained deliberation artifacts. It is never a path to autonomous external action.
 
 ### Still required before production readiness
 

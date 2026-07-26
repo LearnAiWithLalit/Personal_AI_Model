@@ -33,6 +33,7 @@ from guardian_agent.creative import list_creative_artifacts, record_creative_art
 from guardian_agent.workers import dispatch_worker, list_worker_roles
 from guardian_agent.export import export_handoff
 from guardian_agent.browser_operator import execute_browser_action, inspect_web_page
+from guardian_agent.council import configure_council, load_council, run_council
 
 # Phase G0 Imports
 from guardian_agent.runtime import enqueue_task, get_task_status, kill_switch, list_queued_tasks, recover_interrupted_tasks
@@ -177,6 +178,20 @@ def build_parser() -> argparse.ArgumentParser:
     b_action.add_argument("--value")
     b_action.add_argument("--approval-id", help="One approved request ID, required for sensitive actions such as submit")
     b_action.add_argument("--headless", action="store_true", help="Run hidden; visible browser is the default")
+
+    council_p = subparsers.add_parser("council", help="Run an opt-in multi-model analysis council")
+    council_sub = council_p.add_subparsers(dest="council_command", required=True)
+    council_ask = council_sub.add_parser("ask", help="Collect opinions, anonymous reviews, and chairman synthesis")
+    council_ask.add_argument("--project", default=".", type=_project_path)
+    council_ask.add_argument("--task", choices=["research", "planning", "review", "documentation", "routing"], required=True)
+    council_ask.add_argument("--prompt", required=True)
+    council_ask.add_argument("--members", type=int)
+    council_config = council_sub.add_parser("configure", help="Configure council member limit and chairman route")
+    council_config.add_argument("--project", default=".", type=_project_path)
+    council_config.add_argument("--members", type=int, required=True)
+    council_config.add_argument("--chairman", help="Provider ID or provider:model route")
+    council_show = council_sub.add_parser("show", help="Show council configuration")
+    council_show.add_argument("--project", default=".", type=_project_path)
 
     # Run completion
     run_parser = subparsers.add_parser("run", help="Execute task completion using routed model")
@@ -335,6 +350,15 @@ def main(argv: list[str] | None = None) -> int:
                     brain, url=args.url, action=args.action, selector=args.selector,
                     value=args.value, visible=not args.headless, approval_id=args.approval_id,
                 ), indent=2))
+            return 0
+
+        if args.command == "council":
+            if args.council_command == "ask":
+                print(json.dumps(run_council(brain, task=args.task, prompt=args.prompt, max_members=args.members), indent=2))
+            elif args.council_command == "configure":
+                print(json.dumps(configure_council(brain, args.members, args.chairman), indent=2))
+            elif args.council_command == "show":
+                print(json.dumps(load_council(brain), indent=2))
             return 0
 
         if args.command == "run":

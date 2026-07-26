@@ -229,6 +229,16 @@ def setup_ollama_provider(brain: ProjectBrain, model_name: str = "qwen2.5-coder"
 
 
 def choose_model(brain: ProjectBrain, task: str) -> dict:
+    routes = list_routes_for_task(brain, task)
+    if not routes:
+        raise GuardianError(
+            f"No enabled, policy-approved model is configured for {task}. Add a local/free provider or allow paid routing."
+        )
+    return routes[0]
+
+
+def list_routes_for_task(brain: ProjectBrain, task: str) -> list[dict]:
+    """Return all policy-approved routes, ordered by cost and configured priority."""
     if task not in TASK_CAPABILITIES:
         raise GuardianError(f"Unknown task type {task!r}; use: {', '.join(sorted(TASK_CAPABILITIES))}")
     payload = load_gateway(brain)
@@ -249,21 +259,19 @@ def choose_model(brain: ProjectBrain, task: str) -> dict:
                     model,
                 )
             )
-    if not candidates:
-        raise GuardianError(
-            f"No enabled, policy-approved model is configured for {task}. Add a local/free provider or allow paid routing."
-        )
-    _, provider, model = min(candidates, key=lambda item: item[0])
-    return {
-        "task": task,
-        "provider": provider.id,
-        "provider_kind": provider.kind,
-        "base_url": provider.base_url,
-        "credential_env": provider.credential_env,
-        "model": model.id,
-        "capabilities": model.capabilities,
-        "cost_tier": model.cost_tier,
-    }
+    return [
+        {
+            "task": task,
+            "provider": provider.id,
+            "provider_kind": provider.kind,
+            "base_url": provider.base_url,
+            "credential_env": provider.credential_env,
+            "model": model.id,
+            "capabilities": model.capabilities,
+            "cost_tier": model.cost_tier,
+        }
+        for _, provider, model in sorted(candidates, key=lambda item: item[0])
+    ]
 
 
 def record_telemetry(
@@ -285,8 +293,9 @@ def complete_task_with_model(
     task: str,
     prompt: str,
     system_prompt: str | None = None,
+    route: dict | None = None,
 ) -> dict:
-    route = choose_model(brain, task)
+    route = route or choose_model(brain, task)
     base_url = route.get("base_url")
     model_id = route.get("model")
     provider_id = route.get("provider", "unknown")

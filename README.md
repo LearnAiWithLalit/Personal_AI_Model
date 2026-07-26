@@ -18,6 +18,7 @@ Guardian is designed to be the durable coordinator—not another model subscript
 | Durable runtime | Stores queued tasks, task locks, recovery state, health records, and an emergency stop. Interrupted tasks with external side effects wait for review. |
 | Browser operator | Inspects pages with Playwright or HTTP fallback; Playwright can perform visible, bounded navigate/click/fill/screenshot/submit actions. |
 | Sensitive actions | Uses policy checks and a one-time approval queue for browser submission, payments, deletion, irreversible pushes, account creation, legal acceptance, and identity checks. |
+| LLM Council | Optional multi-model deliberation: independent opinions, anonymized peer reviews, and a chairman synthesis for difficult analysis. |
 
 ## How Guardian fits into a workflow
 
@@ -152,6 +153,27 @@ guardian browser action \
 ```
 
 Browser actions are visible by default. Add `--headless` only when that is appropriate for a non-sensitive, authorized workflow.
+
+## LLM Council for difficult decisions
+
+Council mode is inspired by the [LLM Council pattern](https://github.com/karpathy/llm-council): Guardian asks multiple configured providers for independent answers, anonymizes those answers for peer review, and then asks a configured chairman route to synthesize a final recommendation. This is useful for architecture choices, research, risk review, and ambiguous plans.
+
+It is **opt-in** because it uses multiple model calls. It supports only analysis tasks (`research`, `planning`, `review`, `documentation`, and `routing`) and cannot be used to trigger coding, browser, account, payment, or other external actions.
+
+```bash
+# Use up to three eligible configured models; the lowest-cost eligible model
+# becomes chairman unless you explicitly configure another route.
+guardian council configure --members 3 --chairman local-ollama
+
+guardian council ask \
+  --task planning \
+  --prompt "Compare a monolith and modular architecture for this project. Include risks and validation steps."
+
+# Inspect the current council policy
+guardian council show
+```
+
+Guardian writes the full deliberation record to `.agent/artifacts/` and a concise completion entry to the project journey. Failed council members are shown honestly; Guardian does not fabricate a consensus or a final answer when every member fails.
 
 ## Skills and specialist handoffs
 
