@@ -191,6 +191,11 @@ class IdempotencyLedger:
                     raise GuardianError(f"Idempotent operation {composite_key!r} not found in ledger.")
 
                 stored_token = entry.get("owner_token")
+                if entry.get("status") == "completed":
+                    raise GuardianError(
+                        f"Security violation: completed connector operation {composite_key!r} is immutable and cannot be overwritten."
+                    )
+
                 if stored_token and stored_token != owner_token:
                     raise GuardianError(
                         f"Security violation: owner token mismatch for operation {composite_key!r}. Completion denied."
@@ -215,10 +220,17 @@ class IdempotencyLedger:
             try:
                 ledger = cls.load(brain)
                 entry = ledger.get(composite_key, {})
-                if entry.get("status") == "reserved":
+                st = entry.get("status")
+                if st == "reserved":
                     stored_token = entry.get("owner_token")
-                    if owner_token and stored_token and stored_token != owner_token:
-                        raise GuardianError(f"Security violation: owner token mismatch for operation {composite_key!r}.")
+                    if not owner_token:
+                        raise GuardianError(
+                            f"Security violation: owner_token is required to mark reserved operation {composite_key!r} as unknown_outcome."
+                        )
+                    if stored_token and stored_token != owner_token:
+                        raise GuardianError(
+                            f"Security violation: owner token mismatch for operation {composite_key!r}."
+                        )
 
                 ledger[composite_key] = {
                     "status": "unknown_outcome",
@@ -253,11 +265,16 @@ class IdempotencyLedger:
                 if not entry:
                     raise GuardianError(f"Idempotent operation {composite_key!r} not found in ledger.")
 
-                if entry.get("status") not in ("unknown_outcome", "reserved"):
+                st = entry.get("status")
+                now_ts = time.time()
+                reserved_ts = float(entry.get("reserved_timestamp", 0))
+                is_stale_reserved = (st == "reserved") and (now_ts - reserved_ts >= 300)
+
+                if st != "unknown_outcome" and not is_stale_reserved:
                     raise GuardianError(
-                        f"Operation {composite_key!r} is in status {entry.get('status')!r}, not 'unknown_outcome'. "
-                        "Reconciliation is only allowed for interrupted or stale operations."
+                        f"Security violation: live reserved operation {composite_key!r} cannot be reconciled/cancelled without owner token completion or TTL expiration."
                     )
+
 
                 if clean_res == "completed":
                     final_receipt = receipt or {
@@ -426,9 +443,10 @@ class CanvaConnector(BaseConnector):
             "account_id": self.account_id,
             "authenticated": False,
             "credential_available": is_ready,
-            "remote_authenticated": is_ready,
+            "remote_authenticated": False,
             "status": "credential_available" if is_ready else "authentication_required",
         }
+
 
     def list_assets(self, brain: ProjectBrain, query: str = "", allow_mock: bool = False) -> dict[str, Any]:
         _check_allow_mock_permitted(allow_mock)
@@ -578,9 +596,10 @@ class AdobeConnector(BaseConnector):
             "account_id": self.account_id,
             "authenticated": False,
             "credential_available": is_ready,
-            "remote_authenticated": is_ready,
+            "remote_authenticated": False,
             "status": "credential_available" if is_ready else "authentication_required",
         }
+
 
     def list_assets(self, brain: ProjectBrain, query: str = "", allow_mock: bool = False) -> dict[str, Any]:
         _check_allow_mock_permitted(allow_mock)
@@ -656,9 +675,10 @@ class LovableConnector(BaseConnector):
             "account_id": self.account_id,
             "authenticated": False,
             "credential_available": is_ready,
-            "remote_authenticated": is_ready,
+            "remote_authenticated": False,
             "status": "credential_available" if is_ready else "authentication_required",
         }
+
 
     def list_assets(self, brain: ProjectBrain, query: str = "", allow_mock: bool = False) -> dict[str, Any]:
         _check_allow_mock_permitted(allow_mock)

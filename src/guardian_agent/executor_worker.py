@@ -357,5 +357,6 @@ def process_ready_tickets(
         "executed_count": len(executed),
         "error_count": len(errors),
         "executed": executed,
+        "processed": executed,
         "errors": errors,
     }

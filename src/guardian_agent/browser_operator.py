@@ -280,15 +280,20 @@ def pause_for_takeover(
                             headless=False,
                         )
                         page = context.pages[0] if context.pages else context.new_page()
-                        page.set_content(
-                            f"<html><head><title>Guardian Takeover - {account_id}</title></head>"
-                            f"<body style='font-family:sans-serif; padding:40px; background:#1e1e2e; color:#cdd6f4;'>"
-                            f"<h1>Guardian Agent Manual Takeover Active</h1>"
-                            f"<p>Account: <strong>{account_id}</strong> | Session ID: <code>{takeover_id}</code></p>"
-                            f"<p>Interact with the browser window as needed. To resume automation, run:</p>"
-                            f"<pre style='background:#11111b; padding:15px; border-radius:5px;'>guardian browser takeover resume --account-id {account_id}</pre>"
-                            f"</body></html>"
-                        )
+                        try:
+                            page.evaluate(
+                                f"""() => {{
+                                    if (document.getElementById('guardian-takeover-banner')) return;
+                                    const div = document.createElement('div');
+                                    div.id = 'guardian-takeover-banner';
+                                    div.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:999999;background:#e74c3c;color:#fff;padding:10px 20px;font-family:sans-serif;font-size:14px;font-weight:bold;box-shadow:0 2px 10px rgba(0,0,0,0.5);';
+                                    div.innerHTML = '⚠️ GUARDIAN MANUAL TAKEOVER ACTIVE ({account_id}) — Session: {takeover_id} | Resume via CLI';
+                                    if (document.body) document.body.prepend(div);
+                                }}"""
+                            )
+                        except Exception:
+                            pass
+
                         while time.time() - start < timeout_seconds:
                             if not sig_path.is_file():
                                 status = "resumed"

@@ -711,9 +711,10 @@ The system is not production-ready until it can demonstrate all of the following
 
 ## 30. Free-Resource Operating Plan
 
-Guardian must minimize primary-model usage by treating Ollama, OmniRoute,
-FreeBuff, and optional coding harnesses such as JCode as complementary
-resources rather than interchangeable chat interfaces.
+Guardian must minimize primary-model usage by treating Ollama, optional
+high-resource local runtimes such as Colibri, OmniRoute, FreeBuff, and optional
+coding harnesses such as JCode as complementary resources rather than
+interchangeable chat interfaces.
 
 ### 30.1 Routing order
 
@@ -722,6 +723,7 @@ User request
   -> Guardian deterministic intake, risk, profiles, skills, memory retrieval
   -> user confirms the exact orchestration ID
   -> Ollama for private analysis, summaries, repository maps, and first drafts
+  -> optional Colibri for a difficult compact one-shot local analysis
   -> FreeBuff or JCode for a bounded coding package when repository edits are needed
   -> OmniRoute only for a missing specialty, failed/weak local result, or independent review
   -> primary Codex/Claude/Gemini reviews compact evidence and gives the final green signal
@@ -733,22 +735,26 @@ User request
    decomposition, research summarization, test triage, code explanation,
    skill drafting, and ordinary planning/coding. Send only the selected files
    and compact project context.
-3. **FreeBuff for bounded implementation.** Give it one confirmed task, the
+3. **Colibri as an optional high-resource local specialist.** Route only a
+   difficult compact one-shot reasoning, architecture, review, council, or
+   skill-evaluation task after deterministic hardware/readiness checks and
+   explicit user enablement. Ollama remains the default local route.
+4. **FreeBuff for bounded implementation.** Give it one confirmed task, the
    minimum relevant files, acceptance criteria, constraints, and test command.
    Do not send `.env`, vault data, credentials, account identifiers, raw logs,
    or unrelated files. Use one continuing FreeBuff session per task where
    possible; do not evade its daily/session limits.
-4. **JCode as an optional bounded coding/swarm worker.** Use it only after
+5. **JCode as an optional bounded coding/swarm worker.** Use it only after
    capability discovery and explicit local configuration. Guardian supplies
    the compact task, exact writable paths, verification commands, worker/time
    limits, and provider budget. Guardian retains policy, approval, memory
    governance, final verification, and the final green signal.
-5. **OmniRoute for specialist fallback and review.** Choose a healthy,
+6. **OmniRoute for specialist fallback and review.** Choose a healthy,
    capability-matched free-limited combo only when Ollama is insufficient.
    Use redacted log health, quota/capacity evidence, provider diversity, and a
    maximum of five attempts. Never call all combos merely to obtain more
    opinions. Keep the GPT-5.5 combo last as the final-review reserve.
-6. **Primary model as authority.** Codex, Claude, Gemini, or another user-chosen
+7. **Primary model as authority.** Codex, Claude, Gemini, or another user-chosen
    primary model reviews the compact requirement, patch/diff, test evidence,
    unresolved risks, and conflicting worker findings. It handles high-risk
    judgment and gives the final green signal; it should not repeat successful
@@ -779,6 +785,7 @@ User request
 |---|---|---|
 | Guardian | Intake, confirmation, policy, memory, routing, budgets, recovery, compact handoffs | Spend a model call on deterministic work |
 | Ollama | Private/local reasoning, summaries, triage, first drafts, lightweight review | Decide external approvals or final high-risk acceptance |
+| Colibri (optional) | Slow high-quality local one-shot architecture, review, council, synthesis, and skill evaluation on eligible hardware | Replace Ollama for routine work, receive large agent preambles, run interactive loops, download hundreds of GB without consent, or control tools/external actions |
 | FreeBuff | Confirmed bounded repository implementation and focused tests | Receive secrets/unrelated files, commit, push, or perform unapproved external actions |
 | JCode (optional) | Bounded coding sessions, persistent worker sessions, compact repository inspection, and Guardian-limited swarms | Replace Guardian policy, import credentials automatically, enter self-development mode, spawn unbounded workers, or perform external actions directly |
 | OmniRoute | Capability fallback, diverse second opinion, difficult specialist work, reserved final review | Fan out to every combo or bypass model/member policy |
@@ -840,7 +847,60 @@ primary-model approval. Tests must also prove that telemetry, self-development,
 automatic credential import, unbounded swarm spawning, and direct external
 actions remain disabled.
 
-## 31. Implementation Status — 2026-07-26
+### 30.6 Planned Colibri integration
+
+Colibri is an Apache-2.0 local inference engine that can expose large
+Mixture-of-Experts models through OpenAI- and Anthropic-compatible localhost
+APIs. It is an optional provider for capable user machines, never a required
+Guardian dependency. Reference:
+[JustVugg/colibri](https://github.com/JustVugg/colibri).
+
+The first integration milestone is a `ColibriAdapter` layered over Guardian's
+existing OpenAI-compatible gateway:
+
+- Opt-in feature flag; absent or ineligible installations remain unaffected.
+- Binary/version detection followed by read-only `coli doctor`, `coli plan`,
+  `/health`, and `/v1/models` capability checks.
+- Eligibility policy: at least 24 GB RAM as the recommended user tier,
+  approximately 400 GB free local storage, a suitable fast SSD/NVMe, and a
+  passing Colibri readiness/placement plan. Capability evidence overrides
+  assumptions based only on advertised RAM.
+- Explicit informed approval before downloading, converting, moving, or
+  deleting model weights. Guardian must show expected download size, target
+  directory, free space, and estimated setup implications.
+- Localhost-only default (`127.0.0.1`), locally generated API authentication,
+  no public/LAN binding by Guardian, and no secrets persisted in project files.
+- Registration as a zero-API-cost local route with measured startup, prefill,
+  decode, queue, token, memory, and failure evidence.
+- One generation at a time initially, bounded queueing, long but finite
+  timeouts, cancellation, health-based fallback, and crash-safe accounting.
+- Compact one-shot prompts and bounded outputs. Never send the full journey,
+  full repository, large coding-agent system prompt, or repeated multi-turn
+  tool loop to a disk-streaming configuration.
+- Initial capability limited to text reasoning: architecture analysis,
+  difficult code/security review, council membership, research synthesis, and
+  skill evaluation. Guardian retains all tools, approvals, file writes,
+  browser actions, and external side effects.
+- Ollama remains the preferred local route for ordinary interactive work.
+  Colibri is selected only when its expected quality gain justifies its
+  measured latency and the task can wait.
+
+Colibri availability must be determined by capability rather than RAM alone.
+The current upstream guidance recommends 24 GB or more RAM and roughly 380 GB
+of model storage, while low-memory disk-streaming inference can be extremely
+slow. Guardian must therefore estimate completion time from live prefill and
+decode measurements and request confirmation before dispatching a task whose
+estimate exceeds the user's configured waiting threshold.
+
+**Done when:** on an explicitly configured eligible machine, Guardian can
+discover a localhost Colibri server, run a bounded smoke test, route one compact
+review task, record latency and usage, cancel or time out safely, and fall back
+without losing task state. Tests must prove that an ineligible machine is
+skipped, no model download starts without approval, no non-loopback endpoint is
+auto-configured, no tool/external action is delegated, and Ollama remains the
+ordinary local default.
+
+## 31. Implementation Status — 2026-07-27
 
 ### Implemented foundation
 
@@ -878,15 +938,38 @@ actions remain disabled.
 - Longitudinal evaluation regression alerts detect pass-to-fail changes, material quality drops, and token growth, with stable alert IDs and a persistent audit artifact.
 - Consent-aware cross-project learning library with private project candidates, exact one-time export/delete approvals, mandatory user-supplied sanitized abstractions, secret/private-material rejection, 0600 local storage, deterministic compact search, future-project context injection, and bootstrap guidance. Raw lesson details and project identity are never exported.
 - Execution governor with persistent ordered stages (Ollama, FreeBuff, OmniRoute, final-review, primary-review), slot reservation for final-review routes, durable asynchronous dispatch IDs, authenticated verified-result recording, idempotent replay, timeout fallback, skip-cascade on ordinary-stage pass, failure-continues-fallback on fail/skip, claim-time model-policy/provider-health/capacity revalidation, bounded evidence, safe artifact paths, stale lease recovery, and no secret fields persisted. 37 focused tests verify the lifecycle.
-- Bounded supervisor CLI and runtime loop that only isolates stale execution recovery and writes executor tickets, explicitly preventing any automatic model calls, stage claiming, or policy approval.
-- Full local regression evidence: 290 unit tests pass, the complete source/test tree compiles, and `git diff --check` reports no whitespace errors.
+- Connector idempotency foundation with owner tokens, stale-reservation transition to `unknown_outcome`, blocked blind retry, and explicit reconciliation records.
+- Browser selector preflight checks visibility and disabled state before approval reservation; sensitive actions retain before/after evidence. Manual-takeover status, resume, cancel, timeout, persistent-profile locking, and optional headful-browser controls exist.
+- Supervisor/executor foundation with stale-lease recovery, bounded durable tickets, sequential ticket processing, Ollama/OmniRoute completion dispatch, FreeBuff/Aider handoff generation, emergency-stop enforcement, and a manual primary-review inbox.
+- Full local regression evidence: 294 unit tests pass, the complete source/test tree compiles, and `git diff --check` reports no whitespace errors.
+
+### Validation of the `b37f601` follow-up roadmap
+
+| Roadmap area | Status | Verified boundary |
+|---|---|---|
+| Connector owner tokens and stale-operation blocking | Partial | Reservation and first completion use owner tokens, and stale reservations become `unknown_outcome`; failure marking, repeated completion, and reconciliation still need stricter ownership/state enforcement. |
+| Browser selector preflight and evidence | Partial | Visibility/disabled checks and before/after screenshots exist; overlay/navigation verification and duplicate-submission reconciliation are not complete. |
+| Manual browser takeover | Partial | Persistent-profile headful launch plus status/resume/cancel/timeout controls exist; it opens a takeover page in a new context rather than attaching to and preserving the exact in-flight page. Live end-to-end takeover is not covered by the unit tests. |
+| Browser unknown-outcome recovery | Pending | Interrupted sensitive actions become `unknown_outcome`, but page/transaction/activity evidence is not reconciled before retry. |
+| Canva, Adobe, and Lovable connectors | Scaffold only | Credential presence is detected, but the current non-mock methods return locally synthesized assets/receipts and placeholder files; they do not call an official remote API or browser fallback. |
+| VS Code, Claude Code, Gemini/Antigravity, Codex, and GitHub/PR connectors | Partial/Pending | Bootstrap exports, model routes, and bounded handoffs exist; official authorized application/PR connectors do not. |
+| Account registry, encrypted vault, domains, revocation, backup/restore | Implemented foundation | Local controls exist; OS-keychain storage, rotation/expiry, and production session lifecycle remain pending. |
+| Background supervisor and worker dispatch | Partial | A daemon loop and sequential ticket executor exist; `max_workers` is currently a ticket-count limit rather than real parallel execution, provider-capacity reporting is not wired to the returned `routes` schema, and processed totals read the wrong result key. |
+| Learning, rollback, evaluation, and cross-project consent | Partial | Draft/revision rollback, evaluation history/alerts, quality scoring, and consent-aware sanitized export exist; cryptographic signing and isolated real-task forward evaluation remain pending. |
+| Production readiness | Pending | Multi-user isolation, release packaging, installer/upgrade hardening, incident telemetry, end-to-end security evaluation, dependency/supply-chain review, and production threat modelling remain. |
 
 ### Still required before production readiness
 
 - Provider-specific account/quota endpoints where officially available and broader calibrated semantic/code benchmarks.
-- OS-keychain integrations, profile/account registry, full browser session persistence/manual takeover, and duplicate-submission recovery.
+- Require the exact connector owner token for every reserved-operation failure transition; reject repeated completion, restrict reconciliation to `unknown_outcome`, bind reconciliation to an authorized approval/operator, and add concurrency/crash tests.
+- Complete browser actionability and recovery: overlay/navigation checks, durable submission fingerprints/receipts, page or transaction reconciliation, and no blind retry after an unknown outcome.
+- Attach manual takeover to the exact in-flight authenticated page/session and add a real headful end-to-end takeover test with pause, user action, resume, cancel, timeout, and state preservation.
+- Replace Canva, Adobe, and Lovable placeholder results with official authorized API calls or Guardian-policy-gated visible browser workflows. Never report credential presence as remote authentication success.
+- Add real bounded worker concurrency, correct provider-capacity schema handling and processed accounting, safe shutdown/drain, worker health/heartbeat evidence, and production service installation/upgrade controls.
+- OS-keychain integration, credential rotation/expiry, multiple account/session lifecycle validation, and recovery testing.
 - Cryptographic signing for trusted skills, isolated forward-testing on real tasks, and calibrated multi-model semantic evaluation.
-- Review/commit/PR adapters, an always-on scheduler/worker service, and structured telemetry/incident tooling.
+- Review/commit/PR adapters and structured telemetry/incident tooling.
 - Optional hardened JCode adapter, semantic lazy-skill retrieval, and structure-aware compact repository search.
+- Optional hardware-gated Colibri local-provider adapter with explicit large-download consent, live latency qualification, and compact one-shot routing.
 - Official or authorized connectors for VS Code, Antigravity, Claude Code, Canva, Adobe, Lovable, and any other subscription service.
 - Multi-user isolation, installer/release flow, end-to-end evaluation suite, and production security review.

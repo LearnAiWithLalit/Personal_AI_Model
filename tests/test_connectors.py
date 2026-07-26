@@ -37,6 +37,7 @@ class TestConnectors(unittest.TestCase):
             auth = conn.authenticate(brain)
             self.assertFalse(auth["authenticated"])
             self.assertFalse(auth["credential_available"])
+            self.assertFalse(auth["remote_authenticated"])
             self.assertEqual(auth["status"], "authentication_required")
             self.assertNotIn("vault_ref", auth)
 
@@ -49,6 +50,7 @@ class TestConnectors(unittest.TestCase):
                 auth = conn.authenticate(brain)
                 self.assertTrue(auth["credential_available"])
                 self.assertFalse(auth["authenticated"])
+                self.assertFalse(auth["remote_authenticated"])
                 self.assertEqual(auth["status"], "credential_available")
                 self.assertNotIn("secret_api_token_123", str(auth))
 
@@ -117,10 +119,49 @@ class TestConnectors(unittest.TestCase):
                 brain, "canva", "create_asset", "idem-key-100", {"status": "ok", "asset_id": "a-100"}, owner_token=token
             )
 
+            # Re-completing or overwriting an already completed operation must be rejected
+            with self.assertRaises(GuardianError) as cm3:
+                complete_connector_operation(
+                    brain, "canva", "create_asset", "idem-key-100", {"status": "overwritten"}, owner_token=token
+                )
+            self.assertIn("immutable and cannot be overwritten", str(cm3.exception))
+
             # Re-reserving completed operation returns receipt
             res2 = reserve_connector_operation(brain, "canva", "create_asset", "idem-key-100")
             self.assertTrue(res2["already_completed"])
             self.assertEqual(res2["receipt"]["asset_id"], "a-100")
+
+    def test_mark_unknown_requires_matching_owner_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = initialize(Path(tmp) / "demo", "Idempotency Test", "Phase 5 test")
+            res = reserve_connector_operation(brain, "canva", "create_asset", "idem-key-150")
+            token = res["owner_token"]
+
+            # Marking unknown without token must be rejected
+            with self.assertRaises(GuardianError) as cm1:
+                fail_connector_operation(brain, "canva", "create_asset", "idem-key-150", "Error reason", owner_token=None)
+            self.assertIn("owner_token is required", str(cm1.exception))
+
+            # Marking unknown with wrong token must be rejected
+            with self.assertRaises(GuardianError) as cm2:
+                fail_connector_operation(brain, "canva", "create_asset", "idem-key-150", "Error reason", owner_token="wrong_tok")
+            self.assertIn("owner token mismatch", str(cm2.exception))
+
+            # Marking unknown with matching token succeeds
+            fail_connector_operation(brain, "canva", "create_asset", "idem-key-150", "Error reason", owner_token=token)
+
+    def test_live_reserved_operation_cannot_be_reconciled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = initialize(Path(tmp) / "demo", "Idempotency Test", "Phase 5 test")
+            res = reserve_connector_operation(brain, "canva", "create_asset", "idem-key-180", ttl_seconds=300)
+            self.assertTrue(res["owner_token"].startswith("otok-"))
+
+            # Reconciling a live reserved operation must be rejected
+            with self.assertRaises(GuardianError) as cm:
+                reconcile_connector_outcome(
+                    brain, "canva", "create_asset", "idem-key-180", resolution="cancelled", resolution_reason="Cancel live"
+                )
+            self.assertIn("live reserved operation", str(cm.exception))
 
     def test_idempotency_stale_ttl_expiration_transitions_to_unknown_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

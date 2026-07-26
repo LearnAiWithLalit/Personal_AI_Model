@@ -307,6 +307,7 @@ def supervisor_daemon_run(
     if max_workers < 1 or max_workers > 16:
         raise GuardianError("max_workers must be between 1 and 16.")
 
+    from concurrent.futures import ThreadPoolExecutor
     from guardian_agent.executor_worker import process_ready_tickets
     from guardian_agent.provider_capacity import provider_capacity_status
 
@@ -314,56 +315,64 @@ def supervisor_daemon_run(
     processed_count = 0
     cycle_index = 0
 
-    while True:
-        if is_kill_switch_active(brain):
-            append_journey(brain, "Supervisor Daemon Stopped", ["Emergency stop activated."])
-            break
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="guardian-worker") as executor_pool:
+        while True:
+            if is_kill_switch_active(brain):
+                append_journey(brain, "Supervisor Daemon Stopped", ["Emergency stop activated."])
+                break
 
-        if not indefinite and max_cycles and cycle_index >= max_cycles:
-            break
+            if not indefinite and max_cycles and cycle_index >= max_cycles:
+                break
 
-        cycle_start = time.time()
-        cycle_res = supervisor_run_once(brain)
+            cycle_start = time.time()
+            cycle_res = supervisor_run_once(brain)
 
-        cap = provider_capacity_status(brain)
-        active_providers = [p for p, data in cap.get("providers", {}).items() if data.get("available")]
+            cap = provider_capacity_status(brain)
+            routes = cap.get("routes", [])
+            active_providers = [
+                f"{r.get('provider')}:{r.get('model')}"
+                for r in routes
+                if not r.get("currently_blocked")
+            ]
 
-        if is_kill_switch_active(brain):
+            if is_kill_switch_active(brain):
+                cycles.append({
+                    "cycle": cycle_index + 1,
+                    "timestamp": now_utc(),
+                    "supervisor": cycle_res,
+                    "processed_tickets": 0,
+                    "active_providers": active_providers,
+                })
+                cycle_index += 1
+                break
+
+            # Dispatch ticket processing to background worker pool
+            future = executor_pool.submit(process_ready_tickets, brain, max_tickets=max_workers)
+            work_res = future.result()
+
+            executed_list = work_res.get("executed", work_res.get("processed", []))
+            processed_now = len(executed_list)
+            processed_count += processed_now
+
             cycles.append({
                 "cycle": cycle_index + 1,
                 "timestamp": now_utc(),
                 "supervisor": cycle_res,
-                "processed_tickets": 0,
+                "processed_tickets": processed_now,
                 "active_providers": active_providers,
             })
+
             cycle_index += 1
-            break
 
-        work_res = process_ready_tickets(brain, max_tickets=max_workers)
+            if is_kill_switch_active(brain):
+                break
 
+            if not indefinite and max_cycles and cycle_index >= max_cycles:
+                break
 
-        processed_now = len(work_res.get("processed", []))
-        processed_count += processed_now
-
-        cycles.append({
-            "cycle": cycle_index + 1,
-            "timestamp": now_utc(),
-            "supervisor": cycle_res,
-            "processed_tickets": processed_now,
-            "active_providers": active_providers,
-        })
-
-        cycle_index += 1
-
-        if is_kill_switch_active(brain):
-            break
-
-        if not indefinite and max_cycles and cycle_index >= max_cycles:
-            break
-
-        elapsed = time.time() - cycle_start
-        sleep_dur = max(0.1, interval_seconds - elapsed)
-        time.sleep(sleep_dur)
+            elapsed = time.time() - cycle_start
+            sleep_dur = max(0.1, interval_seconds - elapsed)
+            time.sleep(sleep_dur)
 
     append_journey(
         brain,
@@ -383,6 +392,7 @@ def supervisor_daemon_run(
         "emergency_stop": is_kill_switch_active(brain),
         "cycles": cycles,
     }
+
 
 
 
