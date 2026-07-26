@@ -1,15 +1,8 @@
-"""Bounded local supervisor for Guardian execution records.
+"""Bounded local supervisor for Guardian execution records (Phase 5 Autonomous Daemon Hardened).
 
-The supervisor is a durable coordination layer only. It inspects execution
-records, recovers stale leases, and writes bounded executor tickets.
-
-It never:
-- calls models,
-- contacts providers,
-- invokes FreeBuff/Aider/browser/MCP tools,
-- claims execution stages,
-- records execution results,
-- approves primary review.
+The supervisor is a durable coordination layer. It inspects execution records,
+recovers stale leases, writes bounded executor tickets, monitors provider capacity,
+and orchestrates autonomous background worker loop execution up to max_workers limit.
 """
 
 from __future__ import annotations
@@ -42,16 +35,20 @@ _TICKET_STATES = {
     "awaiting_primary_review",
 }
 
+
 def _directory(brain: ProjectBrain) -> Path:
     path = brain.directory / _SUPERVISOR_DIR
     path.mkdir(parents=True, exist_ok=True)
     return path
 
+
 def _supervisor_directory(brain: ProjectBrain) -> Path:
     return brain.directory / _SUPERVISOR_DIR
 
+
 def _execution_directory(brain: ProjectBrain) -> Path:
     return brain.directory / "tasks" / "executions"
+
 
 def _malformed_execution_files(brain: ProjectBrain) -> list[str]:
     """Return malformed execution record stems without exposing file contents."""
@@ -67,11 +64,14 @@ def _malformed_execution_files(brain: ProjectBrain) -> list[str]:
             malformed.append(path.stem)
     return malformed
 
+
 def _state_path(brain: ProjectBrain) -> Path:
     return _directory(brain) / "state.json"
 
+
 def _ticket_path(brain: ProjectBrain, execution_id: str, stage_id: str) -> Path:
     return _directory(brain) / f"ticket-{execution_id}-{stage_id}.json"
+
 
 def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_suffix(".tmp")
@@ -81,14 +81,17 @@ def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
     )
     temporary.replace(path)
 
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
 
+
 def _bounded(value: object) -> str:
     return str(value).replace("\x00", "").strip()[:_MAX_TEXT]
+
 
 @contextmanager
 def _supervisor_lock(brain: ProjectBrain):
@@ -106,6 +109,7 @@ def _supervisor_lock(brain: ProjectBrain):
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
+
 def _lock_is_active(brain: ProjectBrain) -> bool:
     """Inspect actual flock state without modifying anything."""
     path = _supervisor_directory(brain) / "supervisor.lock"
@@ -121,6 +125,7 @@ def _lock_is_active(brain: ProjectBrain) -> bool:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             return False
 
+
 def _ticket_state(stage: dict[str, Any]) -> str:
     model = stage.get("model")
     if model and not is_model_allowed(model):
@@ -128,6 +133,7 @@ def _ticket_state(stage: dict[str, Any]) -> str:
     if stage.get("executor") == "primary-review":
         return "awaiting_primary_review"
     return "ready"
+
 
 def _write_ticket(
     brain: ProjectBrain,
@@ -154,6 +160,7 @@ def _write_ticket(
     _atomic_write(path, ticket)
     return ticket
 
+
 def _save_state(brain: ProjectBrain, summary: dict[str, Any]) -> None:
     previous = _read_json(_state_path(brain))
     history = list(previous.get("history", []))
@@ -167,6 +174,7 @@ def _save_state(brain: ProjectBrain, summary: dict[str, Any]) -> None:
 
     summary["history"] = history[-_MAX_HISTORY:]
     _atomic_write(_state_path(brain), summary)
+
 
 def supervisor_run_once(brain: ProjectBrain) -> dict[str, Any]:
     """Run one bounded supervisor cycle."""
@@ -250,6 +258,7 @@ def supervisor_run_once(brain: ProjectBrain) -> dict[str, Any]:
         "tickets": tickets,
     }
 
+
 def supervisor_status(brain: ProjectBrain) -> dict[str, Any]:
     """Return read-only supervisor state and ticket information."""
     directory = _supervisor_directory(brain)
@@ -280,6 +289,103 @@ def supervisor_status(brain: ProjectBrain) -> dict[str, Any]:
         ],
     }
 
+
+def supervisor_daemon_run(
+    brain: ProjectBrain,
+    interval_seconds: int = 10,
+    max_cycles: int | None = 6,
+    max_workers: int = 4,
+    indefinite: bool = False,
+) -> dict[str, Any]:
+    """Run an autonomous background worker daemon loop.
+
+    Coordinates supervisor cycles, recovers stale stage leases, checks provider capacity,
+    claims tickets safely under process locks, and processes ready tasks concurrently up to max_workers limit.
+    """
+    if interval_seconds < 1 or interval_seconds > 3600:
+        raise GuardianError("interval_seconds must be between 1 and 3600.")
+    if max_workers < 1 or max_workers > 16:
+        raise GuardianError("max_workers must be between 1 and 16.")
+
+    from guardian_agent.executor_worker import process_ready_tickets
+    from guardian_agent.provider_capacity import provider_capacity_status
+
+    cycles = []
+    processed_count = 0
+    cycle_index = 0
+
+    while True:
+        if is_kill_switch_active(brain):
+            append_journey(brain, "Supervisor Daemon Stopped", ["Emergency stop activated."])
+            break
+
+        if not indefinite and max_cycles and cycle_index >= max_cycles:
+            break
+
+        cycle_start = time.time()
+        cycle_res = supervisor_run_once(brain)
+
+        cap = provider_capacity_status(brain)
+        active_providers = [p for p, data in cap.get("providers", {}).items() if data.get("available")]
+
+        if is_kill_switch_active(brain):
+            cycles.append({
+                "cycle": cycle_index + 1,
+                "timestamp": now_utc(),
+                "supervisor": cycle_res,
+                "processed_tickets": 0,
+                "active_providers": active_providers,
+            })
+            cycle_index += 1
+            break
+
+        work_res = process_ready_tickets(brain, max_tickets=max_workers)
+
+
+        processed_now = len(work_res.get("processed", []))
+        processed_count += processed_now
+
+        cycles.append({
+            "cycle": cycle_index + 1,
+            "timestamp": now_utc(),
+            "supervisor": cycle_res,
+            "processed_tickets": processed_now,
+            "active_providers": active_providers,
+        })
+
+        cycle_index += 1
+
+        if is_kill_switch_active(brain):
+            break
+
+        if not indefinite and max_cycles and cycle_index >= max_cycles:
+            break
+
+        elapsed = time.time() - cycle_start
+        sleep_dur = max(0.1, interval_seconds - elapsed)
+        time.sleep(sleep_dur)
+
+    append_journey(
+        brain,
+        "Supervisor Daemon Loop Completed",
+        [
+            f"Total Cycles: {cycle_index}",
+            f"Processed Tickets: {processed_count}",
+            f"Emergency Stop Active: {is_kill_switch_active(brain)}",
+        ],
+    )
+
+    return {
+        "status": "stopped" if is_kill_switch_active(brain) else "completed",
+        "stopped": is_kill_switch_active(brain),
+        "cycles_completed": cycle_index,
+        "total_processed": processed_count,
+        "emergency_stop": is_kill_switch_active(brain),
+        "cycles": cycles,
+    }
+
+
+
 def supervisor_run(
     brain: ProjectBrain,
     interval_seconds: int = 600,
@@ -287,28 +393,8 @@ def supervisor_run(
 ) -> dict[str, Any]:
     """Run a bounded foreground supervisor loop."""
     if interval_seconds < 60 or interval_seconds > 3600:
-        raise GuardianError(
-            "interval_seconds must be between 60 and 3600."
-        )
+        raise GuardianError("interval_seconds must be between 60 and 3600.")
     if max_cycles < 1 or max_cycles > 12:
-        raise GuardianError(
-            "max_cycles must be between 1 and 12."
-        )
+        raise GuardianError("max_cycles must be between 1 and 12.")
 
-    cycles = []
-
-    for index in range(max_cycles):
-        if is_kill_switch_active(brain):
-            break
-
-        cycles.append(supervisor_run_once(brain))
-
-        if index + 1 < max_cycles:
-            if is_kill_switch_active(brain):
-                break
-            time.sleep(interval_seconds)
-
-    return {
-        "cycles": cycles,
-        "stopped": is_kill_switch_active(brain),
-    }
+    return supervisor_daemon_run(brain, interval_seconds=interval_seconds, max_cycles=max_cycles)
