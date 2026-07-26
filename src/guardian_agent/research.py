@@ -59,7 +59,8 @@ def build_handoff_package(
     
     research_dir = brain.directory / "research"
     research_dir.mkdir(exist_ok=True)
-    pkg_file = research_dir / f"handoff_{task_name.lower().replace(' ', '_')}.md"
+    safe_task = "".join(c if c.isalnum() else "_" for c in task_name.lower())
+    pkg_file = research_dir / f"handoff_{safe_task}.md"
     pkg_file.write_text(markdown_output, encoding="utf-8")
     
     return {
