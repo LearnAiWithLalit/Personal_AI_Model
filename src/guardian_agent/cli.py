@@ -75,7 +75,15 @@ from guardian_agent.operator import audit_log_action
 from guardian_agent.creative import list_creative_artifacts, record_creative_artifact
 from guardian_agent.workers import dispatch_worker, list_worker_roles
 from guardian_agent.export import export_handoff
-from guardian_agent.browser_operator import execute_browser_action, inspect_web_page
+from guardian_agent.browser_operator import (
+    cancel_takeover,
+    execute_browser_action,
+    get_takeover_status,
+    inspect_web_page,
+    pause_for_takeover,
+    resume_takeover,
+)
+
 from guardian_agent.council import configure_council, load_council, run_council
 from guardian_agent.freebuff import create_freebuff_handoff, freebuff_status, launch_freebuff
 from guardian_agent.mcp import (
@@ -469,6 +477,27 @@ def build_parser() -> argparse.ArgumentParser:
     b_action.add_argument("--value")
     b_action.add_argument("--approval-id", help="One approved request ID, required for sensitive actions such as submit")
     b_action.add_argument("--headless", action="store_true", help="Run hidden; visible browser is the default")
+
+    b_takeover = browser_sub.add_parser("takeover", help="Control human visual manual takeover")
+    b_takeover_sub = b_takeover.add_subparsers(dest="takeover_command", required=True)
+
+    b_tk_pause = b_takeover_sub.add_parser("pause", help="Pause execution for manual browser takeover")
+    b_tk_pause.add_argument("--project", default=".", type=_project_path)
+    b_tk_pause.add_argument("--account-id", required=True)
+    b_tk_pause.add_argument("--timeout", type=int, default=300)
+
+    b_tk_status = b_takeover_sub.add_parser("status", help="Get manual browser takeover status")
+    b_tk_status.add_argument("--project", default=".", type=_project_path)
+    b_tk_status.add_argument("--account-id", required=True)
+
+    b_tk_resume = b_takeover_sub.add_parser("resume", help="Resume execution from manual browser takeover")
+    b_tk_resume.add_argument("--project", default=".", type=_project_path)
+    b_tk_resume.add_argument("--account-id", required=True)
+
+    b_tk_cancel = b_takeover_sub.add_parser("cancel", help="Cancel an active manual browser takeover session")
+    b_tk_cancel.add_argument("--project", default=".", type=_project_path)
+    b_tk_cancel.add_argument("--account-id", required=True)
+
 
 
     council_p = subparsers.add_parser("council", help="Run an opt-in multi-model analysis council")
@@ -1347,8 +1376,18 @@ def main(argv: list[str] | None = None) -> int:
                     brain, url=args.url, action=args.action, account_id=args.account_id, selector=args.selector,
                     value=args.value, visible=not args.headless, approval_id=args.approval_id,
                 ), indent=2))
+            elif args.browser_command == "takeover":
+                if args.takeover_command == "pause":
+                    print(json.dumps(pause_for_takeover(brain, args.account_id, timeout_seconds=args.timeout), indent=2))
+                elif args.takeover_command == "status":
+                    print(json.dumps(get_takeover_status(brain, args.account_id), indent=2))
+                elif args.takeover_command == "resume":
+                    print(json.dumps(resume_takeover(brain, args.account_id), indent=2))
+                elif args.takeover_command == "cancel":
+                    print(json.dumps(cancel_takeover(brain, args.account_id), indent=2))
 
             return 0
+
 
         if args.command == "council":
             if args.council_command == "ask":

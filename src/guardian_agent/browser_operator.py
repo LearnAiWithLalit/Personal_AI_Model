@@ -1,16 +1,19 @@
 """Computer Operator Browser Controller with Playwright & HTTP Graceful Fallback (Phase 5 Hardened).
 
 Supports Playwright visual browser testing with URL security validation, Playwright route interception,
-persistent account profiles, profile process locking, late pre-action approval reservation, typed approval checks,
-sensitive action evidence, unknown_outcome recovery, and visible manual takeover.
+persistent account profiles, profile process locking, preflight selector existence/visibility/actionability validation,
+late pre-action approval reservation, typed approval checks, sensitive action evidence, unknown_outcome recovery,
+and real attached visual manual takeover with status, resume, cancel, and timeout CLI controls.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -92,7 +95,6 @@ def inspect_web_page(
         acc = get_account(brain, account_id)
         allowed_domains = acc.get("allowed_domains")
 
-    # Strictly validate URL scheme, IP range, and domain allowlist before any request
     try:
         clean_url = validate_and_sanitize_url(
             url, allow_http=False, allowed_domains=allowed_domains, allow_offline=allow_offline
@@ -114,7 +116,6 @@ def inspect_web_page(
                 browser = p.chromium.launch(headless=True)
                 context = browser.new_context()
 
-                # Network interception: validate every outgoing HTTP request
                 def _route_handler(route, request):
                     try:
                         validate_and_sanitize_url(
@@ -169,40 +170,164 @@ def inspect_web_page(
         }
 
 
+def _takeover_meta_path(brain: ProjectBrain, account_id: str) -> Path:
+    audit_d = brain.directory / "audit"
+    audit_d.mkdir(parents=True, exist_ok=True)
+    return audit_d / f"takeover_{account_id}.json"
+
+
+def get_takeover_status(brain: ProjectBrain, account_id: str) -> dict[str, Any]:
+    """Return active takeover status for account."""
+    meta_p = _takeover_meta_path(brain, account_id)
+    if not meta_p.is_file():
+        return {"account_id": account_id, "status": "inactive"}
+    try:
+        data = json.loads(meta_p.read_text(encoding="utf-8"))
+        sig_p = Path(data.get("signal_path", ""))
+        if not sig_p.is_file():
+            data["status"] = "resumed"
+        return data
+    except Exception:
+        return {"account_id": account_id, "status": "inactive"}
+
+
+def resume_takeover(brain: ProjectBrain, account_id: str) -> dict[str, Any]:
+    """Resume execution from an active manual takeover by removing the signal file."""
+    meta_p = _takeover_meta_path(brain, account_id)
+    sig_p = brain.directory / "audit" / f"takeover_{account_id}.signal"
+
+    if sig_p.is_file():
+        try:
+            sig_p.unlink()
+        except OSError:
+            pass
+
+    if meta_p.is_file():
+        try:
+            data = json.loads(meta_p.read_text(encoding="utf-8"))
+            data["status"] = "resumed"
+            meta_p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+
+    audit_log_action(brain, "browser_takeover_resumed", account_id, "success", "Manual takeover resumed via control signal")
+    return {"account_id": account_id, "status": "resumed"}
+
+
+def cancel_takeover(brain: ProjectBrain, account_id: str) -> dict[str, Any]:
+    """Cancel an active manual takeover session."""
+    meta_p = _takeover_meta_path(brain, account_id)
+    sig_p = brain.directory / "audit" / f"takeover_{account_id}.signal"
+
+    if sig_p.is_file():
+        try:
+            sig_p.unlink()
+        except OSError:
+            pass
+
+    if meta_p.is_file():
+        try:
+            data = json.loads(meta_p.read_text(encoding="utf-8"))
+            data["status"] = "cancelled"
+            meta_p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+
+    audit_log_action(brain, "browser_takeover_cancelled", account_id, "cancelled", "Manual takeover cancelled by user request")
+    return {"account_id": account_id, "status": "cancelled"}
+
+
 def pause_for_takeover(
     brain: ProjectBrain,
     account_id: str,
     timeout_seconds: int = 300,
     signal_file: Path | None = None,
 ) -> dict[str, Any]:
-    """Pause execution holding persistent profile lock for human visual takeover."""
+    """Pause execution holding persistent profile lock for human visual takeover with attached headful context if available."""
     lock_mgr = ProfileLockManager(brain, account_id)
     with lock_mgr:
-        audit_log_action(brain, "browser_takeover_requested", account_id, "started", f"Timeout: {timeout_seconds}s")
+        takeover_id = f"takeover-{uuid.uuid4().hex[:8]}"
+        audit_log_action(brain, "browser_takeover_requested", account_id, "started", f"Takeover ID: {takeover_id}; Timeout: {timeout_seconds}s")
+
         sig_path = signal_file or (brain.directory / "audit" / f"takeover_{account_id}.signal")
         sig_path.parent.mkdir(parents=True, exist_ok=True)
-        sig_path.write_text(f"ACTIVE TAKEOVER for account {account_id} created at {now_utc()}\n", encoding="utf-8")
+        sig_path.write_text(f"ACTIVE TAKEOVER for account {account_id} ({takeover_id}) created at {now_utc()}\n", encoding="utf-8")
 
+        meta_p = _takeover_meta_path(brain, account_id)
+        meta_data = {
+            "takeover_id": takeover_id,
+            "account_id": account_id,
+            "status": "active",
+            "created_at": now_utc(),
+            "expires_at": time.time() + timeout_seconds,
+            "signal_path": str(sig_path),
+        }
+        meta_p.write_text(json.dumps(meta_data, indent=2) + "\n", encoding="utf-8")
+
+        p_dir = profile_path(brain, account_id)
         start = time.time()
         status = "resumed"
+
         try:
-            while time.time() - start < timeout_seconds:
-                if not sig_path.is_file():
-                    status = "resumed"
-                    break
-                time.sleep(1)
+            # If Playwright is available, launch an attached headful persistent browser window for human inspection
+            if check_playwright_available() and p_dir:
+                try:
+                    from playwright.sync_api import sync_playwright
+
+                    with sync_playwright() as playwright:
+                        context = playwright.chromium.launch_persistent_context(
+                            user_data_dir=str(p_dir),
+                            headless=False,
+                        )
+                        page = context.pages[0] if context.pages else context.new_page()
+                        page.set_content(
+                            f"<html><head><title>Guardian Takeover - {account_id}</title></head>"
+                            f"<body style='font-family:sans-serif; padding:40px; background:#1e1e2e; color:#cdd6f4;'>"
+                            f"<h1>Guardian Agent Manual Takeover Active</h1>"
+                            f"<p>Account: <strong>{account_id}</strong> | Session ID: <code>{takeover_id}</code></p>"
+                            f"<p>Interact with the browser window as needed. To resume automation, run:</p>"
+                            f"<pre style='background:#11111b; padding:15px; border-radius:5px;'>guardian browser takeover resume --account-id {account_id}</pre>"
+                            f"</body></html>"
+                        )
+                        while time.time() - start < timeout_seconds:
+                            if not sig_path.is_file():
+                                status = "resumed"
+                                break
+                            time.sleep(0.5)
+                        else:
+                            status = "cancelled_timeout"
+                        context.close()
+                except Exception:
+                    # Fallback loop if GUI browser cannot launch
+                    while time.time() - start < timeout_seconds:
+                        if not sig_path.is_file():
+                            status = "resumed"
+                            break
+                        time.sleep(0.5)
+                    else:
+                        status = "cancelled_timeout"
             else:
-                status = "cancelled_timeout"
+                while time.time() - start < timeout_seconds:
+                    if not sig_path.is_file():
+                        status = "resumed"
+                        break
+                    time.sleep(0.5)
+                else:
+                    status = "cancelled_timeout"
         finally:
             if sig_path.is_file():
                 try:
                     sig_path.unlink()
                 except OSError:
                     pass
+            meta_data["status"] = status
+            meta_data["completed_at"] = now_utc()
+            meta_p.write_text(json.dumps(meta_data, indent=2) + "\n", encoding="utf-8")
 
         audit_log_action(brain, "browser_takeover_completed", account_id, status, f"Outcome: {status}")
         return {
             "account_id": account_id,
+            "takeover_id": takeover_id,
             "status": status,
             "duration_seconds": round(time.time() - start, 2),
         }
@@ -220,7 +345,7 @@ def execute_browser_action(
     approval_id: str | None = None,
     allow_offline: bool = False,
 ) -> dict[str, Any]:
-    """Run one bounded Playwright action with route interception, late reservation, evidence capture, and unknown_outcome handling."""
+    """Run one bounded Playwright action with route interception, preflight actionability validation, late reservation, evidence capture, and unknown_outcome handling."""
     allowed_domains = None
     p_dir = None
     connector_scope = None
@@ -231,7 +356,6 @@ def execute_browser_action(
         connector_scope = acc.get("service_name")
         p_dir = profile_path(brain, account_id)
 
-    # Validate URL scheme, IP range, and domain allowlist
     clean_url = validate_and_sanitize_url(
         url, allow_http=False, allowed_domains=allowed_domains, allow_offline=allow_offline
     )
@@ -267,7 +391,6 @@ def execute_browser_action(
     if needs_approval and not approval_id:
         raise GuardianError(f"Browser action {policy_action!r} requires an approved policy request before execution.")
 
-    # Sensitive actions force visible (headful) mode for human oversight
     force_visible = visible or is_sensitive
 
     lock_ctx = ProfileLockManager(brain, account_id) if account_id else None
@@ -308,6 +431,22 @@ def execute_browser_action(
                 if page.url != clean_url:
                     validate_redirect_url(clean_url, page.url, allowed_domains=allowed_domains)
 
+                # PREFLIGHT SELECTOR ACTIONABILITY VALIDATION (Verify selector exists, is visible, and enabled)
+                if selector:
+                    try:
+                        loc = page.locator(selector).first
+                        loc.wait_for(state="visible", timeout=10_000)
+                        if loc.is_disabled():
+                            raise GuardianError(
+                                f"Browser preflight failed: selector {selector!r} on page {clean_url!r} is disabled."
+                            )
+                    except GuardianError:
+                        raise
+                    except Exception as err:
+                        raise GuardianError(
+                            f"Browser preflight failed: selector {selector!r} is not visible or actionable on page {clean_url!r}: {err}"
+                        ) from err
+
                 art_dir = brain.directory / "artifacts"
                 art_dir.mkdir(exist_ok=True)
                 ts_str = now_utc().replace(":", "-").replace(" ", "_")
@@ -317,7 +456,7 @@ def execute_browser_action(
                     before_shot = art_dir / f"browser_before_{clean_action}_{ts_str}.png"
                     page.screenshot(path=str(before_shot))
 
-                # LATE PRE-ACTION APPROVAL RESERVATION (Immediately before side effect)
+                # LATE PRE-ACTION APPROVAL RESERVATION (Immediately before side effect execution)
                 if approval_id:
                     res_rec = reserve_action_approval(
                         brain,
