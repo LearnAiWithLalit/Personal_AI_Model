@@ -425,3 +425,286 @@ user requirement -> confirmation -> plan -> coding handoff -> validation
 
 Once this loop is dependable, the system can add skills, models, providers, browser workflows, creative apps, and specialist workers without losing coherence.
 
+## 19. Runtime, Trust, and Recovery Layer (Phase G0)
+
+This phase is mandatory before browser, account, or background autonomy. It turns a CLI demonstration into a durable system that can safely continue work across crashes, restarts, provider failures, and user interruptions.
+
+### 19.1 Durable task runtime
+
+Build a local task engine with:
+
+- Persistent task records, states, inputs, outputs, ownership, and timestamps.
+- Queue priorities: interactive user work, normal project work, and low-priority background learning.
+- Explicit task states: `draft`, `awaiting_confirmation`, `queued`, `running`, `awaiting_approval`, `blocked`, `failed`, `cancelled`, and `completed`.
+- Idempotency keys so a retry cannot accidentally submit a form, deploy, or send a message twice.
+- Checkpoints, pause/resume, cancellation, retry limits, exponential backoff, and timeout budgets.
+- Scheduler support for health checks, capacity checks, skill evaluations, backups, and user-approved recurring tasks.
+- Per-project locks and browser/profile locks so two workers cannot conflict over the same files or account session.
+- Crash recovery: unfinished tasks resume only after their checkpoint and policy are revalidated.
+
+### 19.2 Policy and approval engine
+
+Replace ad-hoc permissions with versioned, machine-readable policy files.
+
+```text
+policy/
+  default-policy.json
+  project-policy.json
+  service-policy.json
+  approval-queue.jsonl
+```
+
+Policies must define:
+
+- Allowed tools, domains, applications, accounts, file paths, commands, and networks.
+- Cost/spend/token/time limits.
+- Which actions are silent, user-visible, one-time approved, or always require approval.
+- Escalation rules for new services, changed permissions, failed verification, and risky content.
+- A user-visible emergency stop/kill switch that immediately stops queued and running work.
+- Immutable audit references for every policy decision.
+
+### 19.3 Recovery and continuity
+
+- Encrypted backup of project brain, policies, task state, skill registry, and audit metadata.
+- Restore drills that prove a project can be resumed on a fresh machine.
+- Provider-failure fallback with a clear record of which work can safely retry.
+- Versioned migrations for every persistent data format.
+- Configurable retention periods and secure deletion/export for user data.
+
+## 20. Identity, Accounts, Credentials, and Consent
+
+### 20.1 Encrypted credential vault
+
+Replace environment-variable-only secret resolution with a vault abstraction supporting:
+
+- Operating-system keychain for personal/local deployments.
+- Approved encrypted password managers or enterprise secret managers.
+- OAuth authorization, refresh-token lifecycle, revocation, expiry detection, and rotation.
+- `vault://` references in project files; never secret values.
+- Per-project and per-service scopes, least privilege, and secret redaction from prompts/logs/screenshots.
+- A secret-access audit that records the reference and purpose, never the value.
+
+### 20.2 Account lifecycle
+
+Define agent-managed identities clearly:
+
+- User-owned accounts: the user authorizes access to their existing subscription/profile.
+- Project-owned service accounts: allowed only for pre-approved services and purposes.
+- Test identities: clearly labeled test users for the project’s own staging/test environments.
+- Each account registry entry records service, owner, purpose, vault reference, permitted actions, creation date, recovery owner, expiry, and revocation status.
+- Account creation is allowed only under standing authorization and service policy; stop for payment, identity verification, CAPTCHA, MFA, terms acceptance, or unsupported sites.
+- Never create identities to evade free-tier limits, impersonate people, or conceal automated activity.
+
+### 20.3 Consent and handoff UX
+
+- First-run consent screen for provider, browser, account, data-retention, and background-learning permissions.
+- Approval queue with clear description, impact, target, reversibility, and expected cost.
+- User can approve once for a scoped recurring workflow, deny, edit policy, or take manual control.
+- Every approval is linked to the task and policy version that consumed it.
+
+## 21. Provider Health, Discovery, and Cost Control
+
+### 21.1 Verified provider catalog
+
+Provider discovery must use official websites, documentation, APIs, model registries, and explicitly authorized connectors. Each catalog record needs:
+
+- Source URL and retrieval date.
+- Terms/free-tier status, auth method, region restrictions, and official model identifiers.
+- Capability, context limit, modality, tool support, price/quota, and provider status.
+- Validation result, expiry/recheck date, and risk classification.
+
+Hardcoded free model names are only development fixtures, never production discovery.
+
+### 21.2 Health and routing
+
+- Active health checks and capability probes for configured providers.
+- Track actual rate-limit headers, quota, latency, failure rate, real token usage, and actual cost.
+- Model-quality score per task type using evaluation results, not marketing claims.
+- Circuit breakers for failing providers and retry/fallback rules that avoid duplicate tool actions.
+- Budget reservations before long-running tasks and warnings before user-defined limits are exceeded.
+- Explicit failure results; never fabricate a successful model response when a provider call fails.
+
+### 21.3 Model execution boundary
+
+- Support authenticated provider adapters with secrets retrieved only at request time from the vault.
+- Normalize provider responses, usage, errors, tool calls, and streaming events.
+- Record provider/model/version used for each artifact so work is reproducible.
+- Separate background/local workloads from interactive premium-model workloads.
+
+## 22. Research Integrity and Knowledge Governance
+
+### 22.1 Research pipeline
+
+- Search, fetch, extract, summarize, compare, and cite sources as separate steps.
+- Prefer primary/official sources for technical, financial, security, legal, and product claims.
+- Store source URL, title, retrieval time, relevant excerpt/summary, license/usage notes, and confidence.
+- Mark conclusions as fact, source claim, or Guardian inference.
+- Detect stale sources and schedule revalidation for time-sensitive decisions.
+
+### 22.2 Prompt-injection and hostile-content defense
+
+- Treat web pages, repositories, PDFs, emails, tool responses, and imported skills as untrusted data.
+- Strip or isolate instructions found in untrusted content from Guardian system/policy instructions.
+- Require explicit approval before untrusted content can trigger commands, credential access, browser actions, or policy changes.
+- Maintain allowlists for external domains and high-risk tool operations.
+
+### 22.3 Memory governance
+
+- Separate private user memory, project memory, organization-shared memory, and public reusable skill templates.
+- Never copy raw private project/account information into global learning.
+- Require sanitization and approval before exporting a lesson or skill to shared catalogs.
+- Support user review, correction, export, expiry, and deletion of saved memory.
+
+## 23. Secure Coding and Software Delivery
+
+### 23.1 Safe workspace control
+
+- All autonomous code work uses isolated worktrees/branches or disposable sandboxes.
+- Generate diffs and change manifests before overwriting tracked source files.
+- Create checkpoints/commits before material edits, with a one-command rollback path.
+- Restrict writable paths; never allow a task to escape its project sandbox.
+- Use dependency allowlists, lockfile review, license checks, and vulnerability scanning.
+
+### 23.2 Command execution
+
+- Replace unrestricted shell execution with command allowlists, structured argument execution, resource limits, network policy, and container/VM isolation when appropriate.
+- Record command, working directory, duration, exit result, sanitized output, and artifact references.
+- Block destructive commands unless specifically covered by policy and approval.
+
+### 23.3 Delivery lifecycle
+
+```text
+branch/worktree -> implementation -> tests/lint/build -> security/dependency review
+-> browser/UI verification -> human/automated acceptance criteria -> commit/PR
+-> approved deployment -> post-deploy check -> rollback if required
+```
+
+The Guardian must track deployment environment, release version, migration status, owner, and rollback instructions.
+
+## 24. Browser, Desktop, and Subscription Operations
+
+### 24.1 Real Computer Operator capabilities
+
+- Browser actions: open, navigate, click, fill, select, upload, download, wait, inspect, and screenshot.
+- Persistent isolated browser profiles tied to authorized account references.
+- Visible live session mode and manual user takeover without losing task state.
+- Page/action risk classification before submission or data export.
+- Download malware scanning and upload source/destination confirmation.
+- Desktop application support only through approved OS automation/accessibility interfaces, with the same audit/policy model.
+
+### 24.2 Creative subscriptions
+
+For Canva, Adobe, Lovable, and future tools:
+
+- Prefer official APIs, plug-ins, or supported integration methods.
+- Fall back to a user-visible authenticated browser session only when permitted.
+- Track asset/project ID, revision, source files, export format, storage location, brand/license constraints, and ownership.
+- Synchronize user manual edits into the project artifact record before continuing work.
+- Never bypass subscription limits, licensing, terms, or account controls.
+
+### 24.3 Operator evaluation scenarios
+
+- Login to a pre-authorized test account and complete a reversible workflow.
+- Allow the user to take over mid-task and resume safely.
+- Detect and stop on CAPTCHA/MFA/payment/legal acceptance.
+- Verify screenshots/logs redact secrets and sensitive form values.
+- Recover safely after browser crash, session expiry, or duplicate submission risk.
+
+## 25. Skills, Plugins, and Supply-Chain Security
+
+Every skill/plugin requires a signed or attributable manifest:
+
+```text
+name, version, author/source, description, permissions, tools, dependencies,
+network domains, data classification, tests, evaluation results, trust status,
+created date, updated date, rollback version
+```
+
+Rules:
+
+- Generated skills are drafts and cannot gain new permissions automatically.
+- Trusted skills run only after tests and policy checks pass.
+- Imported skills/plugins are quarantined and inspected before activation.
+- Skill execution uses least privilege and records version/provenance in task output.
+- Support revoke, disable, pin, update, and rollback actions.
+
+## 26. Multi-User, Organization, and Distribution Design
+
+### 26.1 Identity and tenancy
+
+- Local personal mode requires no central account by default.
+- Team/organization mode needs user authentication, roles, project membership, service-account ownership, and tenant isolation.
+- Define roles: owner, admin, member, reviewer, operator, and read-only auditor.
+- Enforce per-user project paths, vault scopes, browser profiles, provider budgets, and audit visibility.
+
+### 26.2 Deployment modes
+
+- Personal local desktop/CLI installation.
+- Team self-hosted service with company-managed providers and secrets.
+- Optional future managed cloud control plane, with end-to-end isolation and explicit data residency policy.
+- Import/export tooling for sanitized skills, project templates, and user-owned project brain backups.
+
+### 26.3 Product updates
+
+- Signed, versioned application and skill updates.
+- Compatibility/migration checks before upgrade.
+- Release notes that state changed permissions, data handling, and provider behavior.
+- Safe rollback to the previous application/skill version.
+
+## 27. Observability, Evaluation, and Incident Response
+
+### 27.1 Observability
+
+- Structured logs with task ID, project ID, user/actor, policy decision, model/provider, tool call, duration, and outcome.
+- Trace a task through Guardian planning, model calls, worker handoffs, browser actions, tests, and deployment.
+- Metrics: completion, quality, verification pass rate, user takeover rate, token/cost savings, provider health, policy blocks, and retry rate.
+- Privacy-aware telemetry: no secret values or private content in central metrics.
+
+### 27.2 Evaluation suite
+
+Create versioned, reproducible end-to-end scenarios for:
+
+- Requirement understanding and change tracking.
+- Token-efficient handoff quality.
+- Safe provider failover and cost limits.
+- Skill generation/promotion/rollback.
+- Coding, testing, review, and rollback.
+- Browser workflow, human takeover, and policy checkpoints.
+- Canva/Adobe/Lovable artifact collaboration where supported.
+- Memory relevance and prevention of a documented repeated mistake.
+
+Every release must pass the relevant safety, functional, and regression evaluations.
+
+### 27.3 Incident handling
+
+- Detect/report provider misuse, suspicious tool actions, secret exposure, failed policy enforcement, and corrupted task state.
+- Immediate task pause, credential revocation workflow, evidence preservation, user notification, and recovery steps.
+- Post-incident lesson and regression test before re-enabling affected skill/tool workflow.
+
+## 28. Revised Implementation Order
+
+1. Phase A — Foundation and versioned product/policy schemas.
+2. Phase B — Guardian, project brain, confirmation, journey, and compact context.
+3. Phase C — Independent model gateway with real provider execution boundaries.
+4. Phase D — Research integrity, source citations, and compact handoff.
+5. Phase E — Skill factory, memory governance, and evaluation/promotion flow.
+6. Phase F — VS Code/CLI, secure coding worktrees, verification, and rollback.
+7. **Phase G0 — Runtime, approvals, encrypted vault, provider health, observability, and recovery.**
+8. Phase G — Real Computer Operator with browser/session/user-takeover controls.
+9. Phase H — Canva/Adobe/Lovable and other subscription integrations.
+10. Phase I — Specialist teams, organization deployment, hardening, installers, and release evaluation.
+
+## 29. Production Readiness Gate
+
+The system is not production-ready until it can demonstrate all of the following:
+
+- Resume a paused project after restart without losing decisions, task state, or user control.
+- Route work to a healthy, authorized provider and surface provider failure honestly.
+- Keep secrets out of project files, logs, model context, screenshots, and exports.
+- Prevent untrusted web/repository content from changing policy or triggering sensitive actions.
+- Make/review/rollback code changes in an isolated workspace.
+- Run an approved browser workflow with visible user takeover and no duplicate submissions.
+- Respect account/subscription policy and stop at MFA, CAPTCHA, payment, legal acceptance, or new unapproved services.
+- Create, test, promote, disable, and roll back a skill with full provenance.
+- Prove token/cost savings and task-quality gains on the evaluation suite.
+- Let a separate user install the product and use only their own accounts, providers, browser profiles, and project memory.

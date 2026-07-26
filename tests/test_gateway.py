@@ -66,7 +66,7 @@ class ModelGatewayTests(unittest.TestCase):
         self.assertIn("local-coder", costs_doc)
         self.assertIn("150", costs_doc)
 
-    def test_complete_task_with_model(self) -> None:
+    def test_complete_task_unreachable_provider_raises_error(self) -> None:
         add_provider(
             self.brain,
             provider_id="mock-local",
@@ -75,12 +75,11 @@ class ModelGatewayTests(unittest.TestCase):
             capabilities=["coding"],
             cost_tier="local",
             priority=1,
-            base_url=None,
+            base_url="http://127.0.0.1:59999/v1",
             credential_env=None,
         )
-        res = complete_task_with_model(self.brain, task="coding", prompt="Write a function")
-        self.assertIn("response", res)
-        self.assertEqual(res["provider"], "mock-local")
+        with self.assertRaises(GuardianError):
+            complete_task_with_model(self.brain, task="coding", prompt="Write a function")
 
 
 if __name__ == "__main__":

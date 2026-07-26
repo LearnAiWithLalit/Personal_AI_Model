@@ -1,7 +1,7 @@
 """Independent, secret-free model-provider registry, router, and completion engine.
 
 The gateway stores provider metadata only. Provider API keys remain in an
-environment variable, OS keychain, or future encrypted-vault integration.
+environment variable, OS keychain, or encrypted vault.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from guardian_agent.core import GuardianError, ProjectBrain, append_journey, now_utc, markdown_escape
+from guardian_agent.health import record_provider_error, record_provider_success
 
 
 GATEWAY_FILE = "model-gateway.json"
@@ -55,7 +56,7 @@ def default_gateway() -> dict:
         "policy": {
             "prefer_low_cost": True,
             "allow_paid": False,
-            "note": "Credentials are referenced by environment variable; never save secret values here.",
+            "note": "Credentials are referenced by environment variable or vault; never save secret values here.",
         },
         "providers": [],
     }
@@ -281,8 +282,8 @@ def complete_task_with_model(
     route = choose_model(brain, task)
     base_url = route.get("base_url")
     model_id = route.get("model")
+    provider_id = route.get("provider", "unknown")
     
-    # If base_url exists, attempt live HTTP completion
     if base_url:
         try:
             url = f"{base_url.rstrip('/')}/chat/completions"
@@ -299,16 +300,14 @@ def complete_task_with_model(
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 text = data["choices"][0]["message"]["content"]
-                record_telemetry(brain, task, route["provider"], model_id, tokens=len(prompt.split()), cost_usd=0.0)
-                return {"task": task, "provider": route["provider"], "model": model_id, "response": text}
-        except Exception:
-            pass  # Fall back to structured task mock response if offline / test environment
-            
-    # Mock/deterministic fallback execution
-    response_text = f"[Guardian Gateway Simulated Output from {model_id}]: Plan for '{prompt[:60]}...' compiled successfully."
-    record_telemetry(brain, task, route["provider"], model_id, tokens=len(prompt.split()), cost_usd=0.0)
-    append_journey(brain, f"Gateway Execution: {task}", [f"Provider: {route['provider']}", f"Model: {model_id}"])
-    return {"task": task, "provider": route["provider"], "model": model_id, "response": response_text}
+                record_provider_success(brain, provider_id)
+                record_telemetry(brain, task, provider_id, model_id, tokens=len(prompt.split()), cost_usd=0.0)
+                return {"task": task, "provider": provider_id, "model": model_id, "response": text}
+        except Exception as error:
+            record_provider_error(brain, provider_id, str(error))
+            raise GuardianError(f"Provider {provider_id!r} completion failed: {error}") from error
+
+    raise GuardianError(f"Provider {provider_id!r} has no valid base_url configured for completion.")
 
 
 def provider_summary(brain: ProjectBrain) -> list[dict]:

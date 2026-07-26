@@ -1,4 +1,4 @@
-"""Command line interface for Guardian Agent across Phases A through I."""
+"""Command line interface for Guardian Agent across Phases A through I, including Phase G0."""
 
 from __future__ import annotations
 
@@ -33,6 +33,13 @@ from guardian_agent.creative import list_creative_artifacts, record_creative_art
 from guardian_agent.workers import dispatch_worker, list_worker_roles
 from guardian_agent.export import export_handoff
 from guardian_agent.browser_operator import inspect_web_page
+
+# Phase G0 Imports
+from guardian_agent.runtime import enqueue_task, get_task_status, kill_switch, list_queued_tasks
+from guardian_agent.policy import check_policy_permission, get_policy, load_approval_queue, request_action_approval, approve_action_request
+from guardian_agent.vault import get_secret, has_secret, store_secret
+from guardian_agent.sandbox import create_worktree_sandbox, generate_diff_preview, rollback_sandbox
+from guardian_agent.health import check_provider_health
 
 
 def _project_path(value: str) -> Path:
@@ -91,6 +98,63 @@ def build_parser() -> argparse.ArgumentParser:
     provider_route = provider_subparsers.add_parser("route", help="Select the lowest-cost capable model")
     provider_route.add_argument("--project", default=".", type=_project_path)
     provider_route.add_argument("--task", choices=["routing", "research", "planning", "coding", "review", "documentation"], required=True)
+
+    # Phase G0: Runtime
+    runtime_p = subparsers.add_parser("runtime", help="Durable task runtime and queue management")
+    runtime_sub = runtime_p.add_subparsers(dest="runtime_command", required=True)
+    r_enq = runtime_sub.add_parser("enqueue", help="Enqueue background task")
+    r_enq.add_argument("--project", default=".", type=_project_path)
+    r_enq.add_argument("--type", required=True)
+    r_enq.add_argument("--summary", required=True)
+    r_enq.add_argument("--priority", default="normal")
+    r_lst = runtime_sub.add_parser("list", help="List queued tasks")
+    r_lst.add_argument("--project", default=".", type=_project_path)
+    r_kill = runtime_sub.add_parser("kill", help="Trigger emergency stop switch")
+    r_kill.add_argument("--project", default=".", type=_project_path)
+
+    # Phase G0: Policy
+    pol_p = subparsers.add_parser("policy", help="Policy-as-code and approval queue")
+    pol_sub = pol_p.add_subparsers(dest="policy_command", required=True)
+    p_chk = pol_sub.add_parser("check", help="Check action permission")
+    p_chk.add_argument("--project", default=".", type=_project_path)
+    p_chk.add_argument("--action", required=True)
+    p_chk.add_argument("--target", default="")
+    p_req = pol_sub.add_parser("request", help="Request action approval")
+    p_req.add_argument("--project", default=".", type=_project_path)
+    p_req.add_argument("--action", required=True)
+    p_req.add_argument("--target", required=True)
+    p_req.add_argument("--reason", required=True)
+    p_app = pol_sub.add_parser("approve", help="Approve action request")
+    p_app.add_argument("--project", default=".", type=_project_path)
+    p_app.add_argument("--id", required=True)
+
+    # Phase G0: Vault
+    vault_p = subparsers.add_parser("vault", help="Encrypted secret vault")
+    vault_sub = vault_p.add_subparsers(dest="vault_command", required=True)
+    v_str = vault_sub.add_parser("store", help="Store encrypted secret")
+    v_str.add_argument("--project", default=".", type=_project_path)
+    v_str.add_argument("--key", required=True)
+    v_str.add_argument("--value", required=True)
+
+    # Phase G0: Sandbox
+    sb_p = subparsers.add_parser("sandbox", help="Git Worktree Sandbox control")
+    sb_sub = sb_p.add_subparsers(dest="sandbox_command", required=True)
+    s_crt = sb_sub.add_parser("create", help="Create worktree sandbox")
+    s_crt.add_argument("--project", default=".", type=_project_path)
+    s_crt.add_argument("--branch", required=True)
+    s_diff = sb_sub.add_parser("diff", help="Generate worktree diff preview")
+    s_diff.add_argument("--project", default=".", type=_project_path)
+    s_diff.add_argument("--path", required=True)
+    s_rb = sb_sub.add_parser("rollback", help="Rollback worktree sandbox")
+    s_rb.add_argument("--project", default=".", type=_project_path)
+    s_rb.add_argument("--path", required=True)
+
+    # Phase G0: Health
+    health_p = subparsers.add_parser("health", help="Provider health monitoring")
+    health_sub = health_p.add_subparsers(dest="health_command", required=True)
+    h_chk = health_sub.add_parser("check", help="Check provider health status")
+    h_chk.add_argument("--project", default=".", type=_project_path)
+    h_chk.add_argument("--provider", required=True)
 
     # Exporter
     export_p = subparsers.add_parser("export", help="Export token-saving handoff packages")
@@ -208,6 +272,43 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(provider_summary(brain), indent=2))
             elif args.provider_command == "route":
                 print(json.dumps(choose_model(brain, args.task), indent=2))
+            return 0
+
+        if args.command == "runtime":
+            if args.runtime_command == "enqueue":
+                print(json.dumps(enqueue_task(brain, args.type, args.summary, args.priority), indent=2))
+            elif args.runtime_command == "list":
+                print(json.dumps(list_queued_tasks(brain), indent=2))
+            elif args.runtime_command == "kill":
+                print(json.dumps(kill_switch(brain), indent=2))
+            return 0
+
+        if args.command == "policy":
+            if args.policy_command == "check":
+                print(json.dumps({"action": args.action, "permission": check_policy_permission(brain, args.action, args.target)}, indent=2))
+            elif args.policy_command == "request":
+                print(json.dumps(request_action_approval(brain, args.action, args.target, args.reason), indent=2))
+            elif args.policy_command == "approve":
+                print(json.dumps(approve_action_request(brain, args.id), indent=2))
+            return 0
+
+        if args.command == "vault":
+            if args.vault_command == "store":
+                print(json.dumps(store_secret(brain, args.key, args.value), indent=2))
+            return 0
+
+        if args.command == "sandbox":
+            if args.sandbox_command == "create":
+                print(json.dumps(create_worktree_sandbox(brain, args.branch), indent=2))
+            elif args.sandbox_command == "diff":
+                print(json.dumps(generate_diff_preview(brain, args.path), indent=2))
+            elif args.sandbox_command == "rollback":
+                print(json.dumps(rollback_sandbox(brain, args.path), indent=2))
+            return 0
+
+        if args.command == "health":
+            if args.health_command == "check":
+                print(json.dumps(check_provider_health(brain, args.provider), indent=2))
             return 0
 
         if args.command == "export":
