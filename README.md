@@ -1,6 +1,37 @@
 # Guardian Agent — Persistent Project Brain & Model Router
 
-**Guardian Agent** is a local-first, persistent project brain and secret-free model gateway. It manages projects from requirement discovery through delivery, preserving requirements, decisions, plans, development journeys, and skills.
+**Guardian Agent** is a local-first, persistent project brain and model gateway. It sits in front of coding models and tools, preserves the project journey, routes work to an appropriate configured provider, and creates compact handoff context for Codex, Claude Code, Antigravity, and future workers.
+
+Guardian is designed to be the durable coordinator—not another model subscription. Your preferred coding model remains the final worker; Guardian reduces repeated explanation, keeps decisions and lessons close to the project, and applies policy before sensitive actions.
+
+## What it can do today
+
+| Area | Current capability |
+| --- | --- |
+| Project memory | Creates a per-project `.agent/` brain with requirements, plans, decisions, lessons, task records, costs, skills, and chronological journey logs. |
+| Requirement control | Records incoming requests as pending, requires confirmation, and keeps confirmed scope in the project plan. |
+| Token-efficient handoffs | Produces compact project context and exports for Codex, Claude Code, and Antigravity. |
+| Provider routing | Registers local or OpenAI-compatible providers, selects the lowest-cost capable configured model, and can call it with an environment or vault credential. |
+| Secrets | Stores encrypted local secrets behind `vault://` references; values are redacted from provider error messages. |
+| Skills and workers | Creates skill drafts, promotes trusted skills, captures reusable lessons, and prepares bounded specialist-worker handoff packages. |
+| Safe coding flow | Applies scoped file edits, runs verification without a shell, records outcomes, and supports isolated sandbox-copy preview/rollback. |
+| Durable runtime | Stores queued tasks, task locks, recovery state, health records, and an emergency stop. Interrupted tasks with external side effects wait for review. |
+| Browser operator | Inspects pages with Playwright or HTTP fallback; Playwright can perform visible, bounded navigate/click/fill/screenshot/submit actions. |
+| Sensitive actions | Uses policy checks and a one-time approval queue for browser submission, payments, deletion, irreversible pushes, account creation, legal acceptance, and identity checks. |
+
+## How Guardian fits into a workflow
+
+```text
+User request
+  -> Guardian records and confirms scope
+  -> project brain supplies only relevant context and lessons
+  -> router selects a configured local/free/paid worker by policy
+  -> worker produces code, research, or a handoff package
+  -> Guardian runs verification, records evidence, and updates journey memory
+  -> sensitive browser/external actions pause for approval
+```
+
+This makes it useful with a local model, Ollama, an OpenAI-compatible gateway, or a preferred cloud coding tool. Each installation owns its own `.agent/` memory, provider configuration, credentials, and browser sessions.
 
 ---
 
@@ -10,8 +41,8 @@ To integrate Guardian Agent into your system or project repository:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-username/guardian-agent.git
-cd guardian-agent
+git clone https://github.com/LearnAiWithLalit/Personal_AI_Model.git
+cd Personal_AI_Model
 
 # 2. Run the interactive installer
 ./install.sh
@@ -42,7 +73,11 @@ guardian intake --request "Add user login with JWT tokens"
 guardian confirm --summary "Implement JWT authentication in HTTP-only cookies"
 guardian decision --title "Auth Stack" --detail "Use standard library pyjwt with zero external DB dependencies"
 guardian lesson --title "Cookie Scope" --detail "Always set Secure and HttpOnly flags on auth cookies"
+guardian context
+guardian status
 ```
+
+Guardian writes these records into `.agent/` inside the project. This folder is the project-specific memory that can be handed to a coding model without sending an entire chat history.
 
 ---
 
@@ -85,6 +120,55 @@ guardian export --target codex
 guardian export --target claude
 ```
 
+## Task runtime, recovery, and approvals
+
+Guardian has a persistent local queue for work that must survive a restart. It does not automatically repeat an interrupted action that might have changed an external system.
+
+```bash
+# Queue and inspect a task
+guardian runtime enqueue --type coding --summary "Add unit tests for authentication"
+guardian runtime list
+
+# Recover an interrupted session safely, or stop all active queued work
+guardian runtime recover
+guardian runtime kill
+
+# Request and approve one sensitive external action
+guardian policy request \
+  --action browser_submit \
+  --target https://example.com/form \
+  --reason "Submit the already-reviewed application"
+guardian policy approve --id req-xxxxxxxx
+```
+
+For an approved browser form submission, use the returned request ID:
+
+```bash
+guardian browser action \
+  --url https://example.com/form \
+  --action submit \
+  --selector 'button[type=submit]' \
+  --approval-id req-xxxxxxxx
+```
+
+Browser actions are visible by default. Add `--headless` only when that is appropriate for a non-sensitive, authorized workflow.
+
+## Skills and specialist handoffs
+
+```bash
+# Keep a new capability in review until it is trusted
+guardian skill draft \
+  --name api-review \
+  --description "Review API changes for compatibility and security" \
+  --instructions "Inspect API contracts, tests, authentication, and error handling."
+guardian skill promote --name api-review
+
+# Prepare a compact handoff for a specialist worker
+guardian worker dispatch --role security --task "Review the authentication change"
+```
+
+The present worker system creates structured handoff packages. Running a multi-agent team or a background worker daemon is still planned work, not a claim of current autonomous execution.
+
 ---
 
 ## 🧪 Running Tests
@@ -110,8 +194,12 @@ guardian vault store --key OPENROUTER_API_KEY --value '...'
 
 The passphrase is required again after a restart. Existing legacy vault files are migrated when a secret is next stored.
 
+Guardian intentionally will not bypass CAPTCHA or MFA, create fake identities, evade a provider quota/free-tier rule, accept legal terms, complete identity verification, submit payment, or use an unapproved external website. Those operations either stop or require a defined user approval path.
+
 ## Current implementation boundary
 
 The repository is a working local foundation, not yet a finished universal autonomous agent. It includes durable project memory, compact handoff exports, provider routing, authenticated provider calls, encrypted local secret storage, task recovery, approvals, code verification, and bounded browser actions.
 
 It deliberately does not bypass CAPTCHA/MFA, identity checks, payments, legal acceptance, or provider limits. Real Canva, Adobe, Lovable, VS Code, and Antigravity integrations still need their official connector/API or an authenticated user-visible browser session.
+
+The roadmap also includes verified live provider discovery, quota and budget controls, full browser-profile management/manual takeover, citation-aware research, signed skill provenance, a worker daemon, multi-user isolation, and production evaluation/security hardening. See [GUARDIAN_AGENT_PROJECT_PLAN.md](GUARDIAN_AGENT_PROJECT_PLAN.md) for the full phased plan.
