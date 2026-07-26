@@ -56,9 +56,11 @@ def _validate_and_normalize_paths(brain: ProjectBrain, raw_paths: list[str]) -> 
         if clean_p.startswith("/") or ".." in clean_p or "\x00" in clean_p:
             raise GuardianError(f"Security violation: path {clean_p!r} is absolute or contains path traversal.")
 
-        base_part = re.sub(r"^\./+", "", clean_p).rstrip("/")
-        if _PROTECTED_PATH_PATTERNS.match(base_part):
-            raise GuardianError(f"Security violation: protected path {clean_p!r} cannot be an allowed path.")
+        for part in Path(clean_p).parts:
+            part_clean = part.strip()
+            if _PROTECTED_PATH_PATTERNS.match(part_clean) or part_clean in (".env", ".git", ".agent"):
+                raise GuardianError(f"Security violation: protected path component {part!r} in {clean_p!r} cannot be an allowed path.")
+
 
 
         target = (root / clean_p).resolve()

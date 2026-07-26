@@ -28,6 +28,7 @@ class TestConnectors(unittest.TestCase):
             # Without vault secret, auth must fail and return authentication_required
             auth = conn.authenticate(brain)
             self.assertFalse(auth["authenticated"])
+            self.assertFalse(auth["credential_available"])
             self.assertEqual(auth["status"], "authentication_required")
             self.assertNotIn("vault_ref", auth)
 
@@ -38,8 +39,9 @@ class TestConnectors(unittest.TestCase):
             os.environ["CANVA_KEY"] = "secret_api_token_123"
             try:
                 auth = conn.authenticate(brain)
-                self.assertTrue(auth["authenticated"])
-                self.assertEqual(auth["status"], "authenticated")
+                self.assertTrue(auth["credential_available"])
+                self.assertFalse(auth["authenticated"])
+                self.assertEqual(auth["status"], "credential_available")
                 self.assertNotIn("secret_api_token_123", str(auth))
 
                 # First creation
@@ -69,7 +71,7 @@ class TestConnectors(unittest.TestCase):
             os.environ["CANVA_KEY2"] = "token2"
             try:
                 conn = get_connector("canva", "canva2")
-                self.assertTrue(conn.authenticate(brain)["authenticated"])
+                self.assertTrue(conn.authenticate(brain)["credential_available"])
 
                 # Revoke session
                 res = conn.revoke_session(brain)

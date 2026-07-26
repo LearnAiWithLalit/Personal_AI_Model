@@ -282,10 +282,10 @@ a chat model by themselves; they can only write evidence for the next session.
 
 ## 7. Fresh verification evidence
 
-Latest verification was run after Phase 4 Hardening and Phase 5A Control Plane Hardening on 2026-07-27:
+Latest verification was run after Phase 4 Hardening and Phase 5A Control Plane Complete Closure on 2026-07-27:
 
 ```text
-Phase 4 & 5A Hardening suite: 9 tests passed
+Phase 4 & 5A Hardening suite: 8 tests passed
 Focused execution suite: 37 tests passed
 Ticket executor worker suite: 10 tests passed
 Supervisor suite: 20 tests passed
@@ -294,10 +294,11 @@ Bootstrap harness suite: 3 tests passed
 IDE adapter hardened suite: 24 tests passed
 Phase 5 security, account & connector suite: 20 tests passed  (URL security: 10, Accounts: 7, Connectors: 3)
 Runtime multi-process suite: 7 tests passed
-Complete repository suite: 289 tests passed  (was 280; +9)
+Complete repository suite: 288 tests passed
 Python compileall: passed
 git diff --check: passed
 ```
+
 
 
 

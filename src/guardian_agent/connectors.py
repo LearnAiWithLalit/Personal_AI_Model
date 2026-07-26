@@ -2,7 +2,8 @@
 
 Provides a standard unified contract for subscription connectors (Canva, Adobe, Lovable),
 capability discovery, user-controlled authentication via vault, typed approval classification,
-durable idempotency ledger, audit receipts, export path traversal validation, and ConnectorNotConfigured guards.
+atomic idempotency ledger reservation, audit receipts, export path traversal validation,
+ConnectorNotConfigured guards, and dev mock isolation guards.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ import json
 import os
 import re
 import secrets
+import sys
+import time
 import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -31,6 +34,15 @@ class ConnectorNotConfigured(GuardianError):
 
 _ALLOWED_EXPORT_FORMATS = {"png", "pdf", "zip", "jpeg", "svg"}
 _ASSET_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _check_allow_mock_permitted(allow_mock: bool) -> None:
+    """Ensure allow_mock=True cannot be used in production unless explicit dev/test flag is set."""
+    if not allow_mock:
+        return
+    is_test_env = "unittest" in sys.modules or "pytest" in sys.modules or os.environ.get("GUARDIAN_ALLOW_DEV_MOCKS") == "1"
+    if not is_test_env:
+        raise GuardianError("Security policy error: allow_mock=True is prohibited in production. Set GUARDIAN_ALLOW_DEV_MOCKS=1 for dev testing.")
 
 
 def _resolve_vault_secret(brain: ProjectBrain, vault_ref: str) -> str | None:
@@ -74,7 +86,7 @@ def _validate_export_path(brain: ProjectBrain, connector_name: str, asset_id: st
 
 
 class IdempotencyLedger:
-    """Durable ledger tracking connector operations to enforce idempotency with atomic writes and locking."""
+    """Durable ledger tracking connector operations with single atomic reservation, completion, and failure transactions."""
 
     @staticmethod
     def _ledger_path(brain: ProjectBrain) -> Path:
@@ -99,39 +111,74 @@ class IdempotencyLedger:
             return {}
 
     @classmethod
-    def get_receipt(cls, brain: ProjectBrain, composite_key: str) -> dict[str, Any] | None:
+    def reserve(cls, brain: ProjectBrain, composite_key: str, payload_hash: str, ttl_seconds: int = 300) -> dict[str, Any] | None:
+        """Atomically check and reserve an operation key before side effect execution."""
         lock_p = cls._lock_path(brain)
         with open(lock_p, "a", encoding="utf-8") as lock_fd:
-            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_SH)
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
             try:
                 ledger = cls.load(brain)
                 entry = ledger.get(composite_key)
-                if entry and entry.get("status") == "completed":
-                    return entry.get("receipt")
+                if entry:
+                    st = entry.get("status")
+                    if st == "completed":
+                        return entry.get("receipt")
+                    if st == "reserved" and time.time() - float(entry.get("reserved_timestamp", 0)) < ttl_seconds:
+                        raise GuardianError(f"Idempotent operation {composite_key!r} is currently locked and running in another process.")
+
+                ledger[composite_key] = {
+                    "status": "reserved",
+                    "payload_hash": payload_hash,
+                    "reserved_at": now_utc(),
+                    "reserved_timestamp": time.time(),
+                }
+                cls._save_under_lock(brain, ledger)
                 return None
             finally:
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
 
     @classmethod
-    def record(cls, brain: ProjectBrain, composite_key: str, status: str, receipt: dict[str, Any] | None = None) -> None:
+    def complete(cls, brain: ProjectBrain, composite_key: str, receipt: dict[str, Any]) -> None:
+        """Atomically record successful operation completion and receipt."""
         lock_p = cls._lock_path(brain)
         with open(lock_p, "a", encoding="utf-8") as lock_fd:
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
             try:
                 ledger = cls.load(brain)
                 ledger[composite_key] = {
-                    "status": status,
-                    "recorded_at": now_utc(),
+                    "status": "completed",
+                    "completed_at": now_utc(),
                     "receipt": receipt,
                 }
-                p = cls._ledger_path(brain)
-                tmp = p.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
-                with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as fh:
-                    json.dump(ledger, fh, indent=2)
-                    fh.write("\n")
-                tmp.replace(p)
+                cls._save_under_lock(brain, ledger)
             finally:
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+
+    @classmethod
+    def mark_unknown(cls, brain: ProjectBrain, composite_key: str, error_reason: str) -> None:
+        """Atomically record unknown_outcome for an interrupted operation."""
+        lock_p = cls._lock_path(brain)
+        with open(lock_p, "a", encoding="utf-8") as lock_fd:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+            try:
+                ledger = cls.load(brain)
+                ledger[composite_key] = {
+                    "status": "unknown_outcome",
+                    "error_reason": error_reason,
+                    "updated_at": now_utc(),
+                }
+                cls._save_under_lock(brain, ledger)
+            finally:
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+
+    @classmethod
+    def _save_under_lock(cls, brain: ProjectBrain, data: dict[str, Any]) -> None:
+        p = cls._ledger_path(brain)
+        tmp = p.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+        tmp.replace(p)
 
 
 class BaseConnector(ABC):
@@ -212,14 +259,14 @@ class CanvaConnector(BaseConnector):
         return {
             "connector": self.connector_name,
             "account_id": self.account_id,
-            "authenticated": bool(secret),
+            "authenticated": False,  # False until real remote authentication succeeds
             "credential_available": bool(secret),
             "remote_authenticated": False,
-            "status": "authenticated" if secret else "authentication_required",
+            "status": "credential_available" if secret else "authentication_required",
         }
 
-
     def list_assets(self, brain: ProjectBrain, query: str = "", allow_mock: bool = False) -> dict[str, Any]:
+        _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
             raise ConnectorNotConfigured(f"Canva connector real backend API is not configured for account {self.account_id!r}.")
         auth = self.authenticate(brain)
@@ -234,6 +281,7 @@ class CanvaConnector(BaseConnector):
         }
 
     def read_asset(self, brain: ProjectBrain, asset_id: str, allow_mock: bool = False) -> dict[str, Any]:
+        _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
             raise ConnectorNotConfigured(f"Canva connector real backend API is not configured for account {self.account_id!r}.")
         auth = self.authenticate(brain)
@@ -255,6 +303,7 @@ class CanvaConnector(BaseConnector):
         approval_id: str | None = None,
         allow_mock: bool = False,
     ) -> dict[str, Any]:
+        _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
             raise ConnectorNotConfigured(f"Canva connector real backend API is not configured for account {self.account_id!r}.")
         auth = self.authenticate(brain)
@@ -264,26 +313,31 @@ class CanvaConnector(BaseConnector):
         param_str = json.dumps(parameters or {}, sort_keys=True)
         composite_raw = f"{self.account_id}:{self.connector_name}:create_asset:{title}:{template_id or ''}:{param_str}"
         composite_key = f"key-{hashlib.sha256(composite_raw.encode('utf-8')).hexdigest()[:24]}"
+        payload_hash = hashlib.sha256(composite_raw.encode("utf-8")).hexdigest()
 
-        cached = IdempotencyLedger.get_receipt(brain, composite_key)
-        if cached:
-            return cached
+        cached_receipt = IdempotencyLedger.reserve(brain, composite_key, payload_hash)
+        if cached_receipt:
+            return cached_receipt
 
-        with ProfileLockManager(brain, self.account_id):
-            asset_id = f"canva-{secrets.token_hex(6)}"
-            receipt = {
-                "connector": self.connector_name,
-                "account_id": self.account_id,
-                "asset_id": asset_id,
-                "title": title,
-                "template_id": template_id,
-                "status": "created",
-                "idempotency_key": composite_key,
-                "created_at": now_utc(),
-            }
-            IdempotencyLedger.record(brain, composite_key, "completed", receipt)
-            append_journey(brain, f"Canva Asset Created: {asset_id}", [f"Title: {title}"])
-            return receipt
+        try:
+            with ProfileLockManager(brain, self.account_id):
+                asset_id = f"canva-{secrets.token_hex(6)}"
+                receipt = {
+                    "connector": self.connector_name,
+                    "account_id": self.account_id,
+                    "asset_id": asset_id,
+                    "title": title,
+                    "template_id": template_id,
+                    "status": "created",
+                    "idempotency_key": composite_key,
+                    "created_at": now_utc(),
+                }
+                IdempotencyLedger.complete(brain, composite_key, receipt)
+                append_journey(brain, f"Canva Asset Created: {asset_id}", [f"Title: {title}"])
+                return receipt
+        except Exception as exc:
+            IdempotencyLedger.mark_unknown(brain, composite_key, str(exc))
+            raise
 
     def export_asset(
         self,
@@ -292,6 +346,7 @@ class CanvaConnector(BaseConnector):
         export_format: str = "png",
         allow_mock: bool = False,
     ) -> dict[str, Any]:
+        _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
             raise ConnectorNotConfigured(f"Canva connector real backend API is not configured for account {self.account_id!r}.")
         auth = self.authenticate(brain)
@@ -343,30 +398,33 @@ class AdobeConnector(BaseConnector):
         return {
             "connector": self.connector_name,
             "account_id": self.account_id,
-            "authenticated": bool(secret),
+            "authenticated": False,
             "credential_available": bool(secret),
             "remote_authenticated": False,
-            "status": "authenticated" if secret else "authentication_required",
+            "status": "credential_available" if secret else "authentication_required",
         }
 
-
     def list_assets(self, brain: ProjectBrain, query: str = "", allow_mock: bool = False) -> dict[str, Any]:
+        _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
             raise ConnectorNotConfigured(f"Adobe connector real backend API is not configured for account {self.account_id!r}.")
         return {"connector": self.connector_name, "account_id": self.account_id, "assets": []}
 
     def read_asset(self, brain: ProjectBrain, asset_id: str, allow_mock: bool = False) -> dict[str, Any]:
+        _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
             raise ConnectorNotConfigured(f"Adobe connector real backend API is not configured for account {self.account_id!r}.")
         return {"connector": self.connector_name, "asset_id": asset_id, "title": f"Adobe Asset {asset_id}"}
 
     def create_asset(self, brain: ProjectBrain, title: str, template_id: str | None = None, parameters: dict[str, Any] | None = None, approval_id: str | None = None, allow_mock: bool = False) -> dict[str, Any]:
+        _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
             raise ConnectorNotConfigured(f"Adobe connector real backend API is not configured for account {self.account_id!r}.")
         asset_id = f"adobe-{secrets.token_hex(6)}"
         return {"connector": self.connector_name, "account_id": self.account_id, "asset_id": asset_id, "title": title, "status": "created"}
 
     def export_asset(self, brain: ProjectBrain, asset_id: str, export_format: str = "pdf", allow_mock: bool = False) -> dict[str, Any]:
+        _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
             raise ConnectorNotConfigured(f"Adobe connector real backend API is not configured for account {self.account_id!r}.")
         out_file = _validate_export_path(brain, self.connector_name, asset_id, export_format)
@@ -407,30 +465,33 @@ class LovableConnector(BaseConnector):
         return {
             "connector": self.connector_name,
             "account_id": self.account_id,
-            "authenticated": bool(secret),
+            "authenticated": False,
             "credential_available": bool(secret),
             "remote_authenticated": False,
-            "status": "authenticated" if secret else "authentication_required",
+            "status": "credential_available" if secret else "authentication_required",
         }
 
-
     def list_assets(self, brain: ProjectBrain, query: str = "", allow_mock: bool = False) -> dict[str, Any]:
+        _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
             raise ConnectorNotConfigured(f"Lovable connector real backend API is not configured for account {self.account_id!r}.")
         return {"connector": self.connector_name, "account_id": self.account_id, "assets": []}
 
     def read_asset(self, brain: ProjectBrain, asset_id: str, allow_mock: bool = False) -> dict[str, Any]:
+        _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
             raise ConnectorNotConfigured(f"Lovable connector real backend API is not configured for account {self.account_id!r}.")
         return {"connector": self.connector_name, "asset_id": asset_id, "title": f"Lovable App {asset_id}"}
 
     def create_asset(self, brain: ProjectBrain, title: str, template_id: str | None = None, parameters: dict[str, Any] | None = None, approval_id: str | None = None, allow_mock: bool = False) -> dict[str, Any]:
+        _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
             raise ConnectorNotConfigured(f"Lovable connector real backend API is not configured for account {self.account_id!r}.")
         asset_id = f"lovable-{secrets.token_hex(6)}"
         return {"connector": self.connector_name, "account_id": self.account_id, "asset_id": asset_id, "title": title, "status": "created"}
 
     def export_asset(self, brain: ProjectBrain, asset_id: str, export_format: str = "zip", allow_mock: bool = False) -> dict[str, Any]:
+        _check_allow_mock_permitted(allow_mock)
         if not allow_mock:
             raise ConnectorNotConfigured(f"Lovable connector real backend API is not configured for account {self.account_id!r}.")
         out_file = _validate_export_path(brain, self.connector_name, asset_id, export_format)

@@ -1,8 +1,8 @@
 """Computer Operator Browser Controller with Playwright & HTTP Graceful Fallback (Phase 5 Hardened).
 
 Supports Playwright visual browser testing with URL security validation, Playwright route interception,
-persistent account profiles, profile process locking, typed approval checks, sensitive action evidence,
-unknown_outcome recovery, and visible manual takeover.
+persistent account profiles, profile process locking, pre-action approval reservation, typed approval checks,
+sensitive action evidence, unknown_outcome recovery, and visible manual takeover.
 """
 
 from __future__ import annotations
@@ -18,9 +18,11 @@ from guardian_agent.accounts import ProfileLockManager, get_account, profile_pat
 from guardian_agent.core import GuardianError, ProjectBrain, markdown_escape, now_utc
 from guardian_agent.operator import audit_log_action
 from guardian_agent.policy import (
+    approve_action_request,
     check_policy_permission,
     consume_action_approval,
     mark_approval_unknown_outcome,
+    reserve_action_approval,
 )
 from guardian_agent.security_url import (
     sanitize_url_for_audit,
@@ -45,6 +47,19 @@ SUPPORTED_BROWSER_ACTIONS = {
 }
 
 SENSITIVE_BROWSER_ACTIONS = {
+    "submit",
+    "publish",
+    "purchase",
+    "delete",
+    "create_account",
+    "accept_terms",
+    "fill_credential",
+    "identity_verification",
+}
+
+ACTIONS_REQUIRING_SELECTOR = {
+    "click_readonly",
+    "fill",
     "submit",
     "publish",
     "purchase",
@@ -89,7 +104,6 @@ def inspect_web_page(
             "method": "url_validation",
         }
     audit_url = sanitize_url_for_audit(clean_url)
-
 
     if check_playwright_available():
         try:
@@ -207,7 +221,7 @@ def execute_browser_action(
     approval_id: str | None = None,
     allow_offline: bool = False,
 ) -> dict[str, Any]:
-    """Run one bounded Playwright action with route interception, evidence capture, and unknown_outcome handling."""
+    """Run one bounded Playwright action with route interception, pre-action reservation, evidence capture, and unknown_outcome handling."""
     allowed_domains = None
     p_dir = None
 
@@ -245,11 +259,21 @@ def execute_browser_action(
     if needs_approval and not approval_id:
         raise GuardianError(f"Browser action {policy_action!r} requires an approved policy request before execution.")
 
+    # STAGE 1 PRE-ACTION APPROVAL RESERVATION BEFORE PLAYWRIGHT LAUNCHES
+    if approval_id:
+        reserve_action_approval(
+            brain,
+            approval_id,
+            policy_action,
+            clean_url,
+            account_id=account_id,
+        )
+
     if not check_playwright_available():
         raise GuardianError("Playwright is required for interactive browser actions; install it and its browser binaries.")
 
-    if clean_action in {"click_readonly", "fill", "submit", "publish", "purchase", "delete"} and not selector and clean_action != "navigate":
-        raise GuardianError(f"Browser action {clean_action!r} requires an exact selector.")
+    if clean_action in ACTIONS_REQUIRING_SELECTOR and not selector:
+        raise GuardianError(f"Browser action {clean_action!r} requires an exact CSS/XPath selector.")
 
     if clean_action in {"fill", "fill_credential"} and value is None:
         raise GuardianError(f"Browser action {clean_action!r} requires a value supplied at execution time.")
@@ -317,6 +341,7 @@ def execute_browser_action(
                 page.screenshot(path=str(after_shot))
                 title = page.title()
 
+                # STAGE 2 POST-CLICK COMPLETION
                 if approval_id:
                     consume_action_approval(
                         brain,

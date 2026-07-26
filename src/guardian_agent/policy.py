@@ -1,7 +1,8 @@
 """Policy-as-Code Engine & Approval Queue (Phase 5 Hardened).
 
 Provides policy evaluation, permission boundary checks, approval queue management,
-atomic queue locking, evidence tracking, and human checkpoint enforcement.
+two-stage approval reservation (approved -> reserved -> consumed/completed | unknown_outcome),
+atomic queue locking, evidence tracking, strict scope verification, and human checkpoint enforcement.
 """
 
 from __future__ import annotations
@@ -20,6 +21,24 @@ from guardian_agent.security_url import sanitize_url_for_audit
 POLICY_FILE = "policy.json"
 APPROVAL_QUEUE_FILE = "approval_queue.jsonl"
 
+_SENSITIVE_ACTIONS = {
+    "submit_payment",
+    "delete_file",
+    "irreversible_git_push",
+    "create_external_account",
+    "browser_submit",
+    "browser_publish",
+    "browser_purchase",
+    "browser_delete",
+    "browser_create_account",
+    "browser_accept_terms",
+    "browser_identity_verification",
+    "browser_fill_credential",
+    "accept_legal_terms",
+    "identity_verification",
+    "captcha_or_mfa_bypass",
+}
+
 
 def default_policy() -> dict:
     return {
@@ -30,22 +49,7 @@ def default_policy() -> dict:
             "allow_local_cmd": True,
             "allow_free_providers": True,
             "allow_paid_providers": False,
-            "require_approval_for": [
-                "submit_payment",
-                "delete_file",
-                "irreversible_git_push",
-                "create_external_account",
-                "browser_submit",
-                "browser_publish",
-                "browser_purchase",
-                "browser_delete",
-                "browser_create_account",
-                "browser_accept_terms",
-                "browser_identity_verification",
-                "browser_fill_credential",
-                "accept_legal_terms",
-                "identity_verification",
-                "captcha_or_mfa_bypass",
+            "require_approval_for": sorted(list(_SENSITIVE_ACTIONS) + [
                 "mcp_trust_server",
                 "mcp_write_tool",
                 "workflow_design_approval",
@@ -55,7 +59,7 @@ def default_policy() -> dict:
                 "runtime_resume",
                 "learning_export",
                 "learning_delete",
-            ],
+            ]),
         },
     }
 
@@ -192,25 +196,93 @@ def approve_action_request(brain: ProjectBrain, request_id: str) -> dict[str, An
             req["status"] = "approved"
             req["approved_at"] = now_utc()
 
-            tmp = q_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
-            with open(tmp, "w", encoding="utf-8") as fh:
-                try:
-                    os.chmod(tmp, 0o600)
-                except OSError:
-                    pass
-                for e in entries:
-                    fh.write(json.dumps(e) + "\n")
-                fh.flush()
-            tmp.replace(q_path)
-            try:
-                os.chmod(q_path, 0o600)
-            except OSError:
-                pass
+            _rewrite_queue_under_lock(q_path, entries)
         finally:
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
 
     append_journey(brain, f"Action Approved: {req['action']}", [f"Request ID: {request_id}"])
     return req
+
+
+def reserve_action_approval(
+    brain: ProjectBrain,
+    request_id: str,
+    action: str,
+    target: str,
+    *,
+    user_id: str | None = None,
+    account_id: str | None = None,
+    connector_scope: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """Atomically validate and reserve an approval BEFORE side effect execution (Stage 1 pre-click lock)."""
+    clean_action = markdown_escape(action)
+    clean_target = sanitize_url_for_audit(target)
+
+    lock_path = _lock_file_path(brain)
+    with open(lock_path, "a", encoding="utf-8") as lock_fd:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+        try:
+            q_path = approval_queue_path(brain)
+            entries = _read_queue_entries(q_path)
+            request = next((entry for entry in entries if entry["id"] == request_id), None)
+            if not request:
+                raise GuardianError(f"Approval request {request_id!r} not found.")
+
+            if request.get("status") not in ("approved", "reserved"):
+                raise GuardianError(f"Approval request {request_id!r} is in status {request.get('status')!r}, not 'approved'.")
+
+            # Expiry validation
+            expires_at = request.get("expires_at")
+            if expires_at and expires_at <= now_utc():
+                request["status"] = "expired"
+                _rewrite_queue_under_lock(q_path, entries)
+                raise GuardianError(f"Approval request {request_id!r} has expired.")
+
+            # Action validation
+            if request.get("action") != clean_action:
+                raise GuardianError(
+                    f"Approval action mismatch: expected {clean_action!r}, got {request.get('action')!r}."
+                )
+
+            # Target validation
+            req_canonical = request.get("canonical_target") or sanitize_url_for_audit(request.get("target", ""))
+            if req_canonical and req_canonical != clean_target and request.get("target") != target:
+                raise GuardianError(
+                    f"Approval target mismatch: approval was granted for target {req_canonical!r}, "
+                    f"cannot be used for target {clean_target!r}."
+                )
+
+            # Strict Scope Validation (Sensitive Action No-Wildcard Rule)
+            is_sensitive = clean_action in _SENSITIVE_ACTIONS
+
+            req_user = request.get("user_id")
+            if user_id and req_user and req_user != user_id:
+                raise GuardianError(f"Approval user ID mismatch: expected {user_id!r}, got {req_user!r}.")
+
+            req_acc = request.get("account_id")
+            if is_sensitive and account_id and not req_acc:
+                raise GuardianError(f"Security violation: approval {request_id!r} lacks mandatory account_id scope for sensitive action {clean_action!r}.")
+            if account_id and req_acc and req_acc != account_id:
+                raise GuardianError(f"Approval account ID mismatch: expected {account_id!r}, got {req_acc!r}.")
+
+            req_scope = request.get("connector_scope")
+            if is_sensitive and connector_scope and not req_scope:
+                raise GuardianError(f"Security violation: approval {request_id!r} lacks mandatory connector_scope for sensitive action {clean_action!r}.")
+            if connector_scope and req_scope and req_scope != connector_scope:
+                raise GuardianError(f"Approval connector scope mismatch: expected {connector_scope!r}, got {req_scope!r}.")
+
+            req_idem = request.get("idempotency_key")
+            if idempotency_key and req_idem and req_idem != idempotency_key:
+                raise GuardianError(f"Approval idempotency key mismatch: expected {idempotency_key!r}, got {req_idem!r}.")
+
+            request["status"] = "reserved"
+            request["reserved_at"] = now_utc()
+            _rewrite_queue_under_lock(q_path, entries)
+        finally:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+
+    return request
 
 
 def consume_action_approval(
@@ -224,66 +296,30 @@ def consume_action_approval(
     connector_scope: str | None = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    """Consume one approved request atomically under exclusive queue lock with full target/scope verification."""
+    """Consume one approved or reserved request atomically (Stage 2 post-click completion)."""
+    # First reserve/validate if still in approved status
+    reserve_action_approval(
+        brain,
+        request_id,
+        action,
+        target,
+        user_id=user_id,
+        account_id=account_id,
+        connector_scope=connector_scope,
+        idempotency_key=idempotency_key,
+    )
+
     clean_action = markdown_escape(action)
-    clean_target = sanitize_url_for_audit(target)
 
     lock_path = _lock_file_path(brain)
     with open(lock_path, "a", encoding="utf-8") as lock_fd:
         fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
         try:
             q_path = approval_queue_path(brain)
-            entries = []
-            if q_path.is_file():
-                for line in q_path.read_text(encoding="utf-8").splitlines():
-                    if line.strip():
-                        try:
-                            entries.append(json.loads(line))
-                        except Exception:
-                            pass
+            entries = _read_queue_entries(q_path)
             request = next((entry for entry in entries if entry["id"] == request_id), None)
             if not request:
                 raise GuardianError(f"Approval request {request_id!r} not found.")
-
-            if request.get("status") != "approved":
-                raise GuardianError(f"Approval request {request_id!r} is in status {request.get('status')!r}, not 'approved'.")
-
-            # Expiry validation
-            expires_at = request.get("expires_at")
-            if expires_at and expires_at <= now_utc():
-                request["status"] = "expired"
-                _rewrite_queue_under_lock(q_path, entries)
-                raise GuardianError(f"Approval request {request_id!r} has expired.")
-
-            # Action validation
-            if request.get("action") != clean_action:
-                raise GuardianError(
-                    f"Approval request action {request.get('action')!r} does not match requested action {clean_action!r}."
-                )
-
-            # Canonical Target validation (CRITICAL FIX)
-            req_canonical = request.get("canonical_target") or sanitize_url_for_audit(request.get("target", ""))
-            if req_canonical and req_canonical != clean_target and request.get("target") != target:
-                raise GuardianError(
-                    f"Approval target mismatch: approval was granted for target {req_canonical!r}, "
-                    f"cannot be consumed for target {clean_target!r}."
-                )
-
-            # User ID validation
-            if user_id and request.get("user_id") and request.get("user_id") != user_id:
-                raise GuardianError(f"Approval user ID mismatch: expected {user_id!r}, got {request.get('user_id')!r}.")
-
-            # Account ID validation
-            if account_id and request.get("account_id") and request.get("account_id") != account_id:
-                raise GuardianError(f"Approval account ID mismatch: expected {account_id!r}, got {request.get('account_id')!r}.")
-
-            # Connector scope validation
-            if connector_scope and request.get("connector_scope") and request.get("connector_scope") != connector_scope:
-                raise GuardianError(f"Approval connector scope mismatch: expected {connector_scope!r}, got {request.get('connector_scope')!r}.")
-
-            # Idempotency key validation
-            if idempotency_key and request.get("idempotency_key") and request.get("idempotency_key") != idempotency_key:
-                raise GuardianError(f"Approval idempotency key mismatch: expected {idempotency_key!r}, got {request.get('idempotency_key')!r}.")
 
             request["status"] = "consumed"
             request["consumed_at"] = now_utc()
@@ -299,20 +335,13 @@ def consume_action_approval(
 
 
 def mark_approval_unknown_outcome(brain: ProjectBrain, request_id: str, error_reason: str) -> dict[str, Any]:
-    """Mark an approval request as unknown_outcome after a browser crash."""
+    """Mark an approval request as unknown_outcome after an interrupted action."""
     lock_path = _lock_file_path(brain)
     with open(lock_path, "a", encoding="utf-8") as lock_fd:
         fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
         try:
             q_path = approval_queue_path(brain)
-            entries = []
-            if q_path.is_file():
-                for line in q_path.read_text(encoding="utf-8").splitlines():
-                    if line.strip():
-                        try:
-                            entries.append(json.loads(line))
-                        except Exception:
-                            pass
+            entries = _read_queue_entries(q_path)
             request = next((entry for entry in entries if entry["id"] == request_id), None)
             if not request:
                 raise GuardianError(f"Approval request {request_id!r} not found.")
@@ -326,6 +355,18 @@ def mark_approval_unknown_outcome(brain: ProjectBrain, request_id: str, error_re
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
 
     return request
+
+
+def _read_queue_entries(q_path: Path) -> list[dict[str, Any]]:
+    entries = []
+    if q_path.is_file():
+        for line in q_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                try:
+                    entries.append(json.loads(line))
+                except Exception:
+                    pass
+    return entries
 
 
 def _rewrite_queue_under_lock(q_path: Path, entries: list[dict[str, Any]]) -> None:

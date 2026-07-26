@@ -400,9 +400,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_req.add_argument("--action", required=True)
     p_req.add_argument("--target", required=True)
     p_req.add_argument("--reason", required=True)
+    p_req.add_argument("--user-id", default="user_default")
+    p_req.add_argument("--account-id")
+    p_req.add_argument("--connector")
+    p_req.add_argument("--idempotency-key")
+    p_req.add_argument("--expires-at")
+    p_req.add_argument("--before-evidence")
     p_app = pol_sub.add_parser("approve", help="Approve action request")
     p_app.add_argument("--project", default=".", type=_project_path)
     p_app.add_argument("--id", required=True)
+
 
     # Phase G0: Vault
     vault_p = subparsers.add_parser("vault", help="Encrypted secret vault")
@@ -1287,7 +1294,19 @@ def main(argv: list[str] | None = None) -> int:
             if args.policy_command == "check":
                 print(json.dumps({"action": args.action, "permission": check_policy_permission(brain, args.action, args.target)}, indent=2))
             elif args.policy_command == "request":
-                print(json.dumps(request_action_approval(brain, args.action, args.target, args.reason), indent=2))
+                print(json.dumps(request_action_approval(
+                    brain,
+                    args.action,
+                    args.target,
+                    args.reason,
+                    user_id=args.user_id,
+                    account_id=args.account_id,
+                    connector_scope=args.connector,
+                    idempotency_key=args.idempotency_key,
+                    expires_at=args.expires_at,
+                    before_evidence=args.before_evidence,
+                ), indent=2))
+
             elif args.policy_command == "approve":
                 print(json.dumps(approve_action_request(brain, args.id), indent=2))
             return 0
