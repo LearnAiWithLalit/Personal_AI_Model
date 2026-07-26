@@ -193,11 +193,12 @@ def _get_project_context(brain: ProjectBrain, task_summary: str = "", stage_allo
     confirmed_reqs.append("Follow confirmed task specification and zero regression policy.")
     confirmed_reqs.append("Never access, modify, or expose protected credentials, secrets, or .env files.")
 
-    # Use stage allowed_paths if explicitly supplied by task planning; otherwise use safe project default paths
-    if stage_allowed_paths and isinstance(stage_allowed_paths, list) and len(stage_allowed_paths) > 0:
+    # Use stage allowed_paths if explicitly supplied by task planning; empty list means zero writable paths
+    if stage_allowed_paths and isinstance(stage_allowed_paths, list):
         approved_paths = list(stage_allowed_paths)
     else:
-        approved_paths = ["src/", "tests/", "docs/"]
+        approved_paths = []
+
 
     # Filter out any sensitive/protected files from allowed_paths fail-closed
     filtered_paths = []

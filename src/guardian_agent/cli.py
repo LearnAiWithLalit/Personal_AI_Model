@@ -797,6 +797,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--allowed-path", action="append", default=[], dest="allowed_paths",
         help="Explicit path allowed for writable task stages (e.g. src/auth/)"
     )
+    orchestrate_start_p.add_argument(
+        "--access-mode", choices=["read-only", "write"], default="read-only",
+        help="Explicit access mode: read-only or write"
+    )
+
 
     orchestrate_show_p = orchestrate_sub.add_parser(
         "show", help="Show a full orchestration record"
@@ -1594,7 +1599,8 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "orchestrate":
             if args.orchestrate_command == "start":
-                result = orchestrate_start(brain, args.task, args.limit, approved_paths=args.allowed_paths)
+                result = orchestrate_start(brain, args.task, args.limit, approved_paths=args.allowed_paths, access_mode=args.access_mode)
+
                 # Print the human-readable preview first, then the structured result
                 print(result["preview_text"])
                 return 0

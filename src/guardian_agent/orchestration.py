@@ -85,7 +85,7 @@ def _validate_and_normalize_paths(brain: ProjectBrain, raw_paths: list[str]) -> 
 
 @dataclass
 class OrchestrationPreview:
-    """Deterministic preview data generated without any model call or side effect."""
+    """Preview of profile, skill, route, and path selection for an orchestration."""
 
     task: str
     risk_profile: str
@@ -95,6 +95,7 @@ class OrchestrationPreview:
     routes: list[dict[str, Any]]
     context_savings: dict[str, Any]
     allowed_paths: list[str] = field(default_factory=list)
+    access_mode: str = "read-only"
 
 
 @dataclass
@@ -163,7 +164,9 @@ def _serialize_record(record: OrchestrationRecord) -> dict[str, Any]:
         "routes": list(preview_dict["routes"]),
         "context_savings": dict(preview_dict["context_savings"]),
         "allowed_paths": list(preview_dict.get("allowed_paths", [])),
+        "access_mode": preview_dict.get("access_mode", "read-only"),
         "prohibited_models": list(PROHIBITED_MODELS),
+
     }
 
     return {
@@ -193,7 +196,9 @@ def _deserialize_record(data: dict[str, Any]) -> OrchestrationRecord:
         routes=list(preview_data.get("routes", [])),
         context_savings=dict(preview_data.get("context_savings", {})),
         allowed_paths=list(preview_data.get("allowed_paths", [])),
+        access_mode=preview_data.get("access_mode", "read-only"),
     )
+
 
     return OrchestrationRecord(
         id=data["id"],
@@ -251,6 +256,7 @@ def orchestrate_start(
     task: str,
     limit: int = 5,
     approved_paths: list[str] | None = None,
+    access_mode: str = "read-only",
 ) -> dict[str, Any]:
     """Create a deterministic orchestration preview and a draft orchestration record."""
     clean_task = markdown_escape(task)
@@ -319,6 +325,7 @@ def orchestrate_start(
         routes=deduped_routes,
         context_savings=profile_result.get("context", {}),
         allowed_paths=normalized_paths,
+        access_mode=access_mode,
     )
 
     orchestration_id = f"orch-{uuid.uuid4().hex[:12]}"
@@ -330,10 +337,12 @@ def orchestrate_start(
         task_type=task_type,
     )
 
-    if task_type in ("coding", "refactoring", "bugfix") and not normalized_paths:
-        record.errors.append("Writable coding task requires explicit approved paths before confirmation.")
+    is_write_mode = (access_mode == "write") or (task_type in ("coding", "refactoring", "bugfix"))
+    if is_write_mode and not normalized_paths:
+        record.errors.append("Writable task requires explicit approved paths before confirmation.")
 
     _save_record(brain, record)
+
 
     preview_lines = [
         f"Orchestration: {orchestration_id}",
@@ -402,11 +411,17 @@ def orchestrate_confirm(
             "not 'draft'. Only draft orchestrations can be confirmed."
         )
 
-    if record.task_type in ("coding", "refactoring", "bugfix") and not record.preview.allowed_paths:
+    allowed_paths = getattr(record.preview, "allowed_paths", []) if hasattr(record.preview, "allowed_paths") else (record.preview.get("allowed_paths", []) if isinstance(record.preview, dict) else [])
+    access_mode = getattr(record.preview, "access_mode", "read-only") if hasattr(record.preview, "access_mode") else (record.preview.get("access_mode", "read-only") if isinstance(record.preview, dict) else "read-only")
+
+
+    is_write_mode = (access_mode == "write") or (record.task_type in ("coding", "refactoring", "bugfix"))
+    if is_write_mode and not allowed_paths:
         raise GuardianError(
-            f"Orchestration {orchestration_id!r} cannot be confirmed: writable coding task "
+            f"Orchestration {orchestration_id!r} cannot be confirmed: writable task "
             "has no explicitly approved paths. Re-run orchestrate start with --allowed-path."
         )
+
 
     clean_summary = markdown_escape(summary or record.task)
     if not clean_summary:

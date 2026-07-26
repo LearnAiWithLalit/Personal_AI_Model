@@ -820,7 +820,9 @@ def record_execution_result(
     current.artifacts_changed = [_safe_artifact_path(brain, a) for a in all_artifacts]
 
     # Validate that EVERY changed artifact falls strictly within stage allowed_paths
-    if current.allowed_paths and current.artifacts_changed:
+    if current.artifacts_changed:
+        if not current.allowed_paths:
+            raise GuardianError("This stage has no writable paths.")
         for art in current.artifacts_changed:
             art_clean = art.lstrip("/")
             matched = False
@@ -833,6 +835,7 @@ def record_execution_result(
                 raise GuardianError(
                     f"Artifact path {art!r} is not within allowed paths for stage {stage_id}: {current.allowed_paths}"
                 )
+
 
 
 

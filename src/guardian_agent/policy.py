@@ -1,7 +1,7 @@
 """Policy-as-Code Engine & Approval Queue (Phase 5 Hardened).
 
 Provides policy evaluation, permission boundary checks, approval queue management,
-two-stage approval reservation (approved -> reserved -> consumed/completed | unknown_outcome),
+two-stage approval reservation (pending -> approved -> reserved(token) -> consumed | unknown_outcome),
 atomic queue locking, evidence tracking, strict scope verification, and human checkpoint enforcement.
 """
 
@@ -156,6 +156,7 @@ def request_action_approval(
         "idempotency_key": idempotency_key or req_id,
         "before_evidence": before_evidence,
         "after_evidence": None,
+        "reservation_token": None,
         "status": "pending",
     }
 
@@ -175,23 +176,26 @@ def request_action_approval(
 
 
 def approve_action_request(brain: ProjectBrain, request_id: str) -> dict[str, Any]:
-    """Approve an action request under exclusive queue lock with atomic rewrite."""
+    """Approve a pending action request under exclusive queue lock with atomic rewrite.
+
+    Guarantees one-time approval lifecycle: only 'pending' requests can be approved.
+    """
+
     lock_path = _lock_file_path(brain)
     with open(lock_path, "a", encoding="utf-8") as lock_fd:
         fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
         try:
             q_path = approval_queue_path(brain)
-            entries = []
-            if q_path.is_file():
-                for line in q_path.read_text(encoding="utf-8").splitlines():
-                    if line.strip():
-                        try:
-                            entries.append(json.loads(line))
-                        except Exception:
-                            pass
+            entries = _read_queue_entries(q_path)
             req = next((e for e in entries if e["id"] == request_id), None)
             if not req:
                 raise GuardianError(f"Approval request {request_id!r} not found.")
+
+            if req.get("status") != "pending":
+                raise GuardianError(
+                    f"Approval request {request_id!r} is in status {req.get('status')!r}, not 'pending'. "
+                    "Cannot re-approve an already processed or consumed request."
+                )
 
             req["status"] = "approved"
             req["approved_at"] = now_utc()
@@ -214,8 +218,13 @@ def reserve_action_approval(
     account_id: str | None = None,
     connector_scope: str | None = None,
     idempotency_key: str | None = None,
+    reservation_token: str | None = None,
 ) -> dict[str, Any]:
-    """Atomically validate and reserve an approval BEFORE side effect execution (Stage 1 pre-click lock)."""
+    """Atomically validate and reserve an approval BEFORE side effect execution (Stage 1 pre-click lock).
+
+    Generates a secret reservation_token. Only an 'approved' request can be reserved.
+    """
+
     clean_action = markdown_escape(action)
     clean_target = sanitize_url_for_audit(target)
 
@@ -229,8 +238,15 @@ def reserve_action_approval(
             if not request:
                 raise GuardianError(f"Approval request {request_id!r} not found.")
 
-            if request.get("status") not in ("approved", "reserved"):
-                raise GuardianError(f"Approval request {request_id!r} is in status {request.get('status')!r}, not 'approved'.")
+            st = request.get("status")
+            if st == "reserved":
+                existing_token = request.get("reservation_token")
+                if reservation_token and existing_token == reservation_token:
+                    return request
+                raise GuardianError(f"Approval request {request_id!r} is already reserved by another process.")
+
+            if st != "approved":
+                raise GuardianError(f"Approval request {request_id!r} is in status {st!r}, not 'approved'.")
 
             # Expiry validation
             expires_at = request.get("expires_at")
@@ -276,7 +292,9 @@ def reserve_action_approval(
             if idempotency_key and req_idem and req_idem != idempotency_key:
                 raise GuardianError(f"Approval idempotency key mismatch: expected {idempotency_key!r}, got {req_idem!r}.")
 
+            token = f"tok-{uuid.uuid4().hex[:12]}"
             request["status"] = "reserved"
+            request["reservation_token"] = token
             request["reserved_at"] = now_utc()
             _rewrite_queue_under_lock(q_path, entries)
         finally:
@@ -295,20 +313,9 @@ def consume_action_approval(
     account_id: str | None = None,
     connector_scope: str | None = None,
     idempotency_key: str | None = None,
+    reservation_token: str | None = None,
 ) -> dict[str, Any]:
     """Consume one approved or reserved request atomically (Stage 2 post-click completion)."""
-    # First reserve/validate if still in approved status
-    reserve_action_approval(
-        brain,
-        request_id,
-        action,
-        target,
-        user_id=user_id,
-        account_id=account_id,
-        connector_scope=connector_scope,
-        idempotency_key=idempotency_key,
-    )
-
     clean_action = markdown_escape(action)
 
     lock_path = _lock_file_path(brain)
@@ -320,6 +327,13 @@ def consume_action_approval(
             request = next((entry for entry in entries if entry["id"] == request_id), None)
             if not request:
                 raise GuardianError(f"Approval request {request_id!r} not found.")
+
+            st = request.get("status")
+            if st not in ("approved", "reserved"):
+                raise GuardianError(f"Approval request {request_id!r} is in status {st!r}, cannot be consumed.")
+
+            if st == "reserved" and reservation_token and request.get("reservation_token") != reservation_token:
+                raise GuardianError(f"Reservation token mismatch for approval request {request_id!r}.")
 
             request["status"] = "consumed"
             request["consumed_at"] = now_utc()
@@ -334,7 +348,12 @@ def consume_action_approval(
     return request
 
 
-def mark_approval_unknown_outcome(brain: ProjectBrain, request_id: str, error_reason: str) -> dict[str, Any]:
+def mark_approval_unknown_outcome(
+    brain: ProjectBrain,
+    request_id: str,
+    error_reason: str,
+    reservation_token: str | None = None,
+) -> dict[str, Any]:
     """Mark an approval request as unknown_outcome after an interrupted action."""
     lock_path = _lock_file_path(brain)
     with open(lock_path, "a", encoding="utf-8") as lock_fd:
@@ -345,6 +364,9 @@ def mark_approval_unknown_outcome(brain: ProjectBrain, request_id: str, error_re
             request = next((entry for entry in entries if entry["id"] == request_id), None)
             if not request:
                 raise GuardianError(f"Approval request {request_id!r} not found.")
+
+            if reservation_token and request.get("reservation_token") != reservation_token:
+                raise GuardianError(f"Reservation token mismatch for approval request {request_id!r}.")
 
             request["status"] = "unknown_outcome"
             request["error_reason"] = error_reason
