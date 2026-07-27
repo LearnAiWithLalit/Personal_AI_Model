@@ -1,13 +1,15 @@
-"""Computer Operator Browser Controller with Playwright & HTTP Graceful Fallback (Phase 5 Hardened).
+"""Computer Operator Browser Controller with Playwright & HTTP Graceful Fallback (Phase 5B).
 
 Supports Playwright visual browser testing with URL security validation, Playwright route interception,
 persistent account profiles, profile process locking, preflight selector existence/visibility/actionability validation,
-late pre-action approval reservation, typed approval checks, sensitive action evidence, unknown_outcome recovery,
-and real attached visual manual takeover with status, resume, cancel, and timeout CLI controls.
+late pre-action approval reservation, typed approval checks, sensitive action evidence, in-flight browser takeover
+with idempotency ledger tracking, unknown_outcome recovery via structured reconciliation, and
+real attached visual manual takeover with status, resume, cancel, and timeout CLI controls.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -18,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from guardian_agent.accounts import ProfileLockManager, get_account, profile_path
+from guardian_agent.connectors import IdempotencyLedger
 from guardian_agent.core import GuardianError, ProjectBrain, markdown_escape, now_utc
 from guardian_agent.operator import audit_log_action
 from guardian_agent.policy import (
@@ -33,6 +36,149 @@ from guardian_agent.security_url import (
     validate_and_sanitize_url,
     validate_redirect_url,
 )
+
+
+_BROWSER_LEDGER_PREFIX = "browser"
+
+
+def _browser_ledger_key(account_id: str, action: str, target_url: str) -> str:
+    """Generate a composite idempotency ledger key for a browser operation.
+
+    Format: browser:{action}:{account_id}:{url_hash[:12]}
+    Action is at position 1 to match the connector key convention
+    (connector:action:idempotency_key), which is critical for the
+    reconcile() cross-field validation that parses position 1 as action.
+    """
+    clean_account = str(account_id or "default").strip()
+    clean_action = str(action or "unknown").strip().lower()
+    url_hash = hashlib.sha256(target_url.encode("utf-8")).hexdigest()[:12]
+    return f"{_BROWSER_LEDGER_PREFIX}:{clean_action}:{clean_account}:{url_hash}"
+
+
+def reserve_browser_operation(
+    brain: ProjectBrain,
+    account_id: str,
+    action: str,
+    target_url: str,
+    ttl_seconds: int = 600,
+) -> dict[str, Any]:
+    """Reserve a browser operation in the idempotency ledger before execution.
+
+    Returns a dict with 'owner_token' for the caller to use when completing
+    or marking the operation as unknown.
+    """
+    comp_key = _browser_ledger_key(account_id, action, target_url)
+    payload_hash = hashlib.sha256(f"{account_id}:{action}:{target_url}".encode("utf-8")).hexdigest()
+    return IdempotencyLedger.reserve(brain, comp_key, payload_hash, ttl_seconds=ttl_seconds)
+
+
+def complete_browser_operation(
+    brain: ProjectBrain,
+    account_id: str,
+    action: str,
+    target_url: str,
+    receipt: dict[str, Any],
+    owner_token: str,
+) -> None:
+    """Complete a browser operation in the idempotency ledger."""
+    comp_key = _browser_ledger_key(account_id, action, target_url)
+    IdempotencyLedger.complete(brain, comp_key, receipt, owner_token=owner_token)
+
+
+def fail_browser_operation(
+    brain: ProjectBrain,
+    account_id: str,
+    action: str,
+    target_url: str,
+    error_reason: str,
+    owner_token: str,
+) -> None:
+    """Mark a browser operation as unknown_outcome in the idempotency ledger."""
+    comp_key = _browser_ledger_key(account_id, action, target_url)
+    IdempotencyLedger.mark_unknown(brain, comp_key, error_reason, owner_token=owner_token)
+
+
+def list_browser_unknown_outcomes(
+    brain: ProjectBrain,
+    account_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """List browser operations in the idempotency ledger with 'unknown_outcome' status.
+
+    Args:
+        brain: Project brain.
+        account_id: Optional filter — only return entries matching this account.
+
+    Returns:
+        List of ledger entries in unknown_outcome state with composite_key populated.
+    """
+    ledger = IdempotencyLedger.load(brain)
+    results: list[dict[str, Any]] = []
+    prefix = f"{_BROWSER_LEDGER_PREFIX}:"
+
+    for comp_key, entry in ledger.items():
+        if not comp_key.startswith(prefix):
+            continue
+        if entry.get("status") != "unknown_outcome":
+            continue
+        if account_id:
+            parts = comp_key.split(":", 3)
+            # Format: browser:{action}:{account_id}:{url_hash[:12]}
+            # account_id is at position 2
+            if len(parts) < 3 or parts[2] != account_id:
+                continue
+        result = dict(entry)
+        result["composite_key"] = comp_key
+        results.append(result)
+
+    return results
+
+
+def reconcile_browser_unknown(
+    brain: ProjectBrain,
+    account_id: str,
+    action: str,
+    target_url: str,
+    resolution: str,
+    resolution_reason: str,
+    evidence: dict[str, Any],
+    approval_id: str,
+    receipt: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Reconcile a browser operation stuck in 'unknown_outcome' state.
+
+    Calls IdempotencyLedger.reconcile() directly with the browser-scoped composite key
+    to avoid the key wrapping that reconcile_connector_outcome() applies.
+
+    Requires structured evidence with all RECONCILIATION_EVIDENCE_FIELDS and
+    a non-empty approval_id.
+
+    cancelled/failed reconciliation releases the lock allowing a new reservation.
+    completed reconciliation is terminal.
+    """
+    comp_key = _browser_ledger_key(account_id, action, target_url)
+    return IdempotencyLedger.reconcile(
+        brain, comp_key, resolution, resolution_reason, evidence, approval_id, receipt=receipt,
+    )
+
+
+def abort_browser_preflight(
+    brain: ProjectBrain,
+    account_id: str,
+    action: str,
+    target_url: str,
+    preflight_reason: str,
+    owner_token: str,
+) -> None:
+    """Abort a browser operation where preflight validation failed before any side effect started.
+
+    Transitions the ledger entry from reserved → preflight_aborted, preserving an audit event.
+    Never marks unknown_outcome because no external action occurred.
+    Allows the next attempt to reserve a fresh operation safely.
+
+    Raises GuardianError on owner token mismatch or ledger write failure (fail-closed).
+    """
+    comp_key = _browser_ledger_key(account_id, action, target_url)
+    IdempotencyLedger.abort_preflight(brain, comp_key, preflight_reason, owner_token=owner_token)
 
 
 SUPPORTED_BROWSER_ACTIONS = {
@@ -400,9 +546,20 @@ def execute_browser_action(
 
     lock_ctx = ProfileLockManager(brain, account_id) if account_id else None
 
+    # Pre-reserve in the idempotency ledger (fail-closed before Playwright launches).
+    # If a prior operation is in unknown_outcome state, the reservation will raise
+    # GuardianError and block the action until reconciliation is performed.
+    ledger_res = reserve_browser_operation(
+        brain, account_id or "default", clean_action, clean_url, ttl_seconds=600
+    )
+    ledger_owner_token: str | None = (
+        ledger_res.get("owner_token") if not ledger_res.get("already_completed") else None
+    )
+
     def _run_action():
         started_operation = False
         res_token = None
+        nonlocal ledger_owner_token
         try:
             from playwright.sync_api import sync_playwright
 
@@ -500,6 +657,21 @@ def execute_browser_action(
                         reservation_token=res_token,
                     )
 
+                # Complete the ledger entry (fail closed — do not silently ignore failures)
+                if ledger_owner_token:
+                    complete_browser_operation(
+                        brain, account_id or "default", clean_action, clean_url,
+                        receipt={
+                            "status": "completed",
+                            "action": clean_action,
+                            "url": audit_url,
+                            "title": title,
+                            "after_screenshot": str(after_shot),
+                            "completed_at": now_utc(),
+                        },
+                        owner_token=ledger_owner_token,
+                    )
+
                 if p_dir:
                     context.close()
                 else:
@@ -521,6 +693,24 @@ def execute_browser_action(
                     mark_approval_unknown_outcome(brain, approval_id, str(error), reservation_token=res_token)
                 except Exception:
                     pass
+            # If the operation never started (preflight failure), release the
+            # reservation via abort_preflight. This transitions reserved → preflight_aborted,
+            # preserving an audit event but allowing the next attempt to reserve a fresh
+            # operation safely. Never marks unknown_outcome because no external action occurred.
+            # Errors are propagated (fail-closed) — no silent except/ignore.
+            if not started_operation and ledger_owner_token:
+                abort_browser_preflight(
+                    brain, account_id or "default", clean_action, clean_url,
+                    preflight_reason=str(error)[:200],
+                    owner_token=ledger_owner_token,
+                )
+            # Mark ledger entry as unknown_outcome ONLY if a side effect started.
+            elif started_operation and ledger_owner_token:
+                fail_browser_operation(
+                    brain, account_id or "default", clean_action, clean_url,
+                    error_reason=str(error),
+                    owner_token=ledger_owner_token,
+                )
             audit_log_action(brain, policy_action, audit_url, "failed", str(error))
             raise GuardianError(f"Browser action failed: {error}") from error
 

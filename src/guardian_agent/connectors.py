@@ -23,7 +23,11 @@ from typing import Any
 
 from guardian_agent.accounts import ProfileLockManager, get_account, revoke_account
 from guardian_agent.core import GuardianError, ProjectBrain, append_journey, now_utc
-from guardian_agent.policy import check_policy_permission, consume_action_approval
+from guardian_agent.policy import (
+    check_policy_permission,
+    consume_action_approval as _consume_approval,
+    load_approval_queue,
+)
 from guardian_agent.security_url import validate_and_sanitize_url
 from guardian_agent.vault import get_secret
 
@@ -34,6 +38,21 @@ class ConnectorNotConfigured(GuardianError):
 
 _ALLOWED_EXPORT_FORMATS = {"png", "pdf", "zip", "jpeg", "svg"}
 _ASSET_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+# Required fields for reconciliation evidence
+RECONCILIATION_EVIDENCE_FIELDS: frozenset[str] = frozenset({
+    "account_id",
+    "connector",
+    "action",
+    "idempotency_key",
+    "approval_id",
+    "operator_identity",
+    "evidence_type",
+    "evidence_reference",
+    "timestamp",
+    "resolution_reason",
+})
 
 
 def _check_allow_mock_permitted(allow_mock: bool) -> None:
@@ -111,6 +130,61 @@ class IdempotencyLedger:
             return {}
 
     @classmethod
+    def _recover_reconciling_entries(cls, brain: ProjectBrain, ledger: dict[str, Any]) -> int:
+        """Recover entries stuck in 'reconciling_started' state (crash-safe WAL recovery).
+
+        Called under the ledger lock. For each entry in 'reconciling_started':
+          - If the referenced approval was consumed → complete the reconciliation
+          - If the referenced approval was NOT consumed → rollback to 'unknown_outcome'
+
+        Returns the number of entries recovered.
+        """
+        recovered = 0
+
+        for comp_key, entry in ledger.items():
+            if entry.get("status") != "reconciling_started":
+                continue
+
+            reconciling_approval_id = entry.get("reconciling_approval_id", "")
+            reconciling_resolution = entry.get("reconciling_resolution", "cancelled")
+            clean_recon_res = reconciling_resolution.lower().strip()
+
+            # Load the approval queue to check if the approval was consumed
+            approvals = load_approval_queue(brain)
+            approval_entry = next(
+                (a for a in approvals if a.get("id") == reconciling_approval_id),
+                None,
+            )
+
+            if approval_entry and approval_entry.get("status") == "consumed":
+                # Crash occurred AFTER approval consumption → complete the reconciliation
+                entry["status"] = f"reconciled_{clean_recon_res}"
+                if clean_recon_res == "completed":
+                    entry["completed_at"] = now_utc()
+                entry["reconciled_at"] = now_utc()
+                entry["reconciled_via_recovery"] = True
+                # Clean up reconciling WAL fields
+                for wal_key in ("reconciling_resolution", "reconciling_approval_id", "reconciling_evidence",
+                                "reconciling_receipt", "reconciling_account_connector_scope", "reconciling_account_id"):
+                    entry.pop(wal_key, None)
+            else:
+                # Crash occurred BEFORE approval consumption → rollback to unknown_outcome
+                entry["status"] = "unknown_outcome"
+                entry["error_reason"] = (
+                    "Reconciliation crashed before approval consumption; rolled back to unknown_outcome. "
+                    "Retry reconciliation with a fresh approval."
+                )
+                entry["updated_at"] = now_utc()
+                # Clean up reconciling WAL fields
+                for wal_key in ("reconciling_resolution", "reconciling_approval_id", "reconciling_evidence",
+                                "reconciling_receipt", "reconciling_account_connector_scope", "reconciling_account_id"):
+                    entry.pop(wal_key, None)
+
+            recovered += 1
+
+        return recovered
+
+    @classmethod
     def reserve(
         cls,
         brain: ProjectBrain,
@@ -119,25 +193,65 @@ class IdempotencyLedger:
         ttl_seconds: int = 300,
         owner_token: str | None = None,
     ) -> dict[str, Any]:
-        """Atomically check and reserve an operation key before side effect execution."""
+        """Atomically check and reserve an operation key before side effect execution.
+
+        State machine:
+          - completed / reconciled_completed → return receipt (terminal)
+          - reconciling_started / unknown_outcome → block, require reconciliation
+          - reconciled_cancelled / reconciled_failed / preflight_aborted → allow re-reservation (lock removed)
+          - reserved → check TTL expiry or owner token
+          - missing → create new reservation
+
+        Crash-safe: runs _recover_reconciling_entries() under lock before processing.
+        """
         lock_p = cls._lock_path(brain)
         with open(lock_p, "a", encoding="utf-8") as lock_fd:
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
             try:
                 ledger = cls.load(brain)
+
+                # Recover any stuck reconciling entries before processing
+                recovered = cls._recover_reconciling_entries(brain, ledger)
+                if recovered > 0:
+                    # Save recovery results before continuing
+                    cls._save_under_lock(brain, ledger)
+
                 entry = ledger.get(composite_key)
                 now_ts = time.time()
 
                 if entry:
                     st = entry.get("status")
-                    if st == "completed":
+
+                    # Terminal completed states: return receipt
+                    if st in ("completed", "reconciled_completed"):
                         return {"already_completed": True, "receipt": entry.get("receipt")}
 
-                    if st == "unknown_outcome":
-                        raise GuardianError(
-                            f"Idempotent operation {composite_key!r} is in 'unknown_outcome' state from a previous interruption. "
-                            "Explicit reconciliation via reconcile_connector_outcome() is required before retrying."
-                        )
+                    # Reconciling-started or unknown outcome: fail-closed, must reconcile first
+                    if st in ("reconciling_started", "unknown_outcome"):
+                        if st == "reconciling_started":
+                            msg = (
+                                f"Idempotent operation {composite_key!r} is in 'reconciling_started' state "
+                                "from an interrupted reconciliation. Recovery will be attempted on next access."
+                            )
+                        else:
+                            msg = (
+                                f"Idempotent operation {composite_key!r} is in 'unknown_outcome' state from a previous interruption. "
+                                "Explicit reconciliation via reconcile_connector_outcome() is required before retrying."
+                            )
+                        raise GuardianError(msg)
+
+                    # Preflight-aborted and reconciled cancellation/failure: lock released, allow fresh reservation
+                    if st in ("reconciled_cancelled", "reconciled_failed", "preflight_aborted"):
+                        token = f"otok-{uuid.uuid4().hex[:12]}"
+                        ledger[composite_key] = {
+                            "status": "reserved",
+                            "payload_hash": payload_hash,
+                            "owner_token": token,
+                            "reserved_at": now_utc(),
+                            "reserved_timestamp": now_ts,
+                        }
+                        cls._save_under_lock(brain, ledger)
+                        return {"already_completed": False, "owner_token": token, "re_reserved": True}
 
                     if st == "reserved":
                         stored_token = entry.get("owner_token")
@@ -176,10 +290,25 @@ class IdempotencyLedger:
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
 
     @classmethod
-    def complete(cls, brain: ProjectBrain, composite_key: str, receipt: dict[str, Any], owner_token: str) -> None:
-        """Atomically record successful operation completion requiring matching owner_token."""
+    def abort_preflight(
+        cls,
+        brain: ProjectBrain,
+        composite_key: str,
+        preflight_reason: str,
+        owner_token: str,
+    ) -> None:
+        """Atomically release a reserved operation where no side effect started.
+
+        Only transitions: reserved → preflight_aborted (with matching owner_token).
+        Never marks unknown_outcome because no external action occurred.
+        Preserves a preflight failure reason as an audit event.
+
+        cancelled/failed reconciliation releases the idempotency lock allowing a new reservation.
+        """
         if not owner_token:
-            raise GuardianError("Security violation: owner_token is required to complete a connector operation.")
+            raise GuardianError(
+                "Security violation: owner_token is required to release a reserved operation."
+            )
 
         lock_p = cls._lock_path(brain)
         with open(lock_p, "a", encoding="utf-8") as lock_fd:
@@ -188,12 +317,129 @@ class IdempotencyLedger:
                 ledger = cls.load(brain)
                 entry = ledger.get(composite_key)
                 if not entry:
+                    raise GuardianError(
+                        f"Idempotent operation {composite_key!r} not found in ledger. Cannot abort preflight."
+                    )
+
+                stored_token = entry.get("owner_token")
+                status = entry.get("status")
+
+                # Terminal completed states are immutable
+                if status in ("completed", "reconciled_completed"):
+                    raise GuardianError(
+                        f"Security violation: completed operation {composite_key!r} is immutable and cannot be aborted."
+                    )
+
+                # Already reconciled states cannot be aborted
+                if status in ("reconciled_cancelled", "reconciled_failed"):
+                    raise GuardianError(
+                        f"Security violation: operation {composite_key!r} has been reconciled as '{status}' and cannot be aborted."
+                    )
+
+                # Already unknown or preflight_aborted
+                if status == "unknown_outcome":
+                    raise GuardianError(
+                        f"Security violation: operation {composite_key!r} is in 'unknown_outcome' state and cannot be aborted. "
+                        "Use reconcile_connector_outcome() instead."
+                    )
+                if status == "preflight_aborted":
+                    raise GuardianError(
+                        f"Security violation: operation {composite_key!r} was already preflight-aborted. "
+                        "Re-reserve before retrying."
+                    )
+
+                # Only reserved can transition to preflight_aborted
+                if status != "reserved":
+                    raise GuardianError(
+                        f"Security violation: cannot abort operation {composite_key!r} from state '{status}'. "
+                        "Only 'reserved' operations can be preflight-aborted."
+                    )
+
+                if stored_token and stored_token != owner_token:
+                    raise GuardianError(
+                        f"Security violation: owner token mismatch for operation {composite_key!r}. Abort denied."
+                    )
+
+                ledger[composite_key] = {
+                    "status": "preflight_aborted",
+                    "preflight_reason": preflight_reason,
+                    "owner_token": stored_token,
+                    "aborted_at": now_utc(),
+                }
+                cls._save_under_lock(brain, ledger)
+            finally:
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+
+    @classmethod
+    def complete(cls, brain: ProjectBrain, composite_key: str, receipt: dict[str, Any], owner_token: str) -> None:
+        """Atomically record successful operation completion.
+
+        Only transitions: reserved → completed (with matching owner_token).
+        Rejects completion from unknown_outcome, reconciled, preflight_aborted, or any non-reserved state.
+        Terminal receipts remain immutable.
+
+        Crash-safe: runs _recover_reconciling_entries() under lock before processing.
+        """
+        if not owner_token:
+            raise GuardianError("Security violation: owner_token is required to complete a connector operation.")
+
+        lock_p = cls._lock_path(brain)
+        with open(lock_p, "a", encoding="utf-8") as lock_fd:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+            try:
+                ledger = cls.load(brain)
+
+                # Recover any stuck reconciling entries before processing
+                recovered = cls._recover_reconciling_entries(brain, ledger)
+                if recovered > 0:
+                    cls._save_under_lock(brain, ledger)
+
+                entry = ledger.get(composite_key)
+                if not entry:
                     raise GuardianError(f"Idempotent operation {composite_key!r} not found in ledger.")
 
                 stored_token = entry.get("owner_token")
-                if entry.get("status") == "completed":
+                status = entry.get("status")
+
+                # Terminal completed states are immutable
+                if status in ("completed", "reconciled_completed"):
                     raise GuardianError(
                         f"Security violation: completed connector operation {composite_key!r} is immutable and cannot be overwritten."
+                    )
+
+                # Unknown outcome must be reconciled first
+                if status == "unknown_outcome":
+                    raise GuardianError(
+                        f"Security violation: operation {composite_key!r} is in 'unknown_outcome' state and must be reconciled "
+                        "before completion. Use reconcile_connector_outcome()."
+                    )
+
+                # Reconciling-started must complete reconciliation first
+                if status == "reconciling_started":
+                    raise GuardianError(
+                        f"Security violation: operation {composite_key!r} is in 'reconciling_started' state. "
+                        "Wait for reconciliation to complete."
+                    )
+
+                # Reconciled cancellation/failure must be re-reserved first
+                if status in ("reconciled_cancelled", "reconciled_failed"):
+                    raise GuardianError(
+                        f"Security violation: operation {composite_key!r} was reconciled as '{status}' and must be "
+                        "re-reserved before completion."
+                    )
+
+                # Preflight-aborted must be re-reserved first
+                if status == "preflight_aborted":
+                    raise GuardianError(
+                        f"Security violation: operation {composite_key!r} was preflight-aborted and must be "
+                        "re-reserved before completion."
+                    )
+
+                # Only reserved state can be completed
+                if status != "reserved":
+                    raise GuardianError(
+                        f"Security violation: cannot complete operation {composite_key!r} from state '{status}'. "
+                        "Only 'reserved' operations can be completed."
                     )
 
                 if stored_token and stored_token != owner_token:
@@ -213,29 +459,85 @@ class IdempotencyLedger:
 
     @classmethod
     def mark_unknown(cls, brain: ProjectBrain, composite_key: str, error_reason: str, owner_token: str | None = None) -> None:
-        """Atomically record unknown_outcome for an interrupted operation requiring matching owner_token if reserved."""
+        """Atomically record unknown_outcome for an interrupted operation.
+
+        Only transitions: reserved → unknown_outcome (with matching owner_token).
+        Rejects marking on non-existent, completed, reconciled, or already-unknown entries.
+
+        Crash-safe: runs _recover_reconciling_entries() under lock before processing.
+        """
         lock_p = cls._lock_path(brain)
         with open(lock_p, "a", encoding="utf-8") as lock_fd:
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
             try:
                 ledger = cls.load(brain)
-                entry = ledger.get(composite_key, {})
+
+                # Recover any stuck reconciling entries before processing
+                recovered = cls._recover_reconciling_entries(brain, ledger)
+                if recovered > 0:
+                    cls._save_under_lock(brain, ledger)
+
+                entry = ledger.get(composite_key)
+                if not entry:
+                    raise GuardianError(
+                        f"Idempotent operation {composite_key!r} not found in ledger. Cannot mark unknown."
+                    )
+
                 st = entry.get("status")
-                if st == "reserved":
-                    stored_token = entry.get("owner_token")
-                    if not owner_token:
-                        raise GuardianError(
-                            f"Security violation: owner_token is required to mark reserved operation {composite_key!r} as unknown_outcome."
-                        )
-                    if stored_token and stored_token != owner_token:
-                        raise GuardianError(
-                            f"Security violation: owner token mismatch for operation {composite_key!r}."
-                        )
+
+                # Terminal completed states cannot be marked unknown
+                if st in ("completed", "reconciled_completed"):
+                    raise GuardianError(
+                        f"Security violation: completed operation {composite_key!r} is immutable and cannot be marked unknown."
+                    )
+
+                # Already reconciled states cannot be marked unknown
+                if st in ("reconciled_cancelled", "reconciled_failed"):
+                    raise GuardianError(
+                        f"Security violation: operation {composite_key!r} has been reconciled as '{st}' and cannot be marked unknown."
+                    )
+
+                # Reconciling-started cannot be marked unknown
+                if st == "reconciling_started":
+                    raise GuardianError(
+                        f"Security violation: operation {composite_key!r} is in 'reconciling_started' state and cannot be marked unknown."
+                    )
+
+                # Preflight-aborted cannot be marked unknown (no external action occurred)
+                if st == "preflight_aborted":
+                    raise GuardianError(
+                        f"Security violation: operation {composite_key!r} was preflight-aborted and cannot be marked unknown. "
+                        "Re-reserve before retrying."
+                    )
+
+                # Already unknown
+                if st == "unknown_outcome":
+                    raise GuardianError(
+                        f"Security violation: operation {composite_key!r} is already in 'unknown_outcome' state."
+                    )
+
+                # Only reserved can transition to unknown_outcome
+                if st != "reserved":
+                    raise GuardianError(
+                        f"Security violation: cannot mark operation {composite_key!r} from state '{st}' as unknown. "
+                        "Only 'reserved' operations can transition to unknown_outcome."
+                    )
+
+                # Owner token check
+                stored_token = entry.get("owner_token")
+                if not owner_token:
+                    raise GuardianError(
+                        f"Security violation: owner_token is required to mark reserved operation {composite_key!r} as unknown_outcome."
+                    )
+                if stored_token and stored_token != owner_token:
+                    raise GuardianError(
+                        f"Security violation: owner token mismatch for operation {composite_key!r}."
+                    )
 
                 ledger[composite_key] = {
                     "status": "unknown_outcome",
                     "error_reason": error_reason,
-                    "owner_token": entry.get("owner_token"),
+                    "owner_token": stored_token,
                     "updated_at": now_utc(),
                 }
                 cls._save_under_lock(brain, ledger)
@@ -249,32 +551,219 @@ class IdempotencyLedger:
         composite_key: str,
         resolution: str,
         resolution_reason: str,
+        evidence: dict[str, Any],
+        approval_id: str,
         receipt: dict[str, Any] | None = None,
+        *,
+        account_connector_scope: str | None = None,
+        account_id: str | None = None,
     ) -> dict[str, Any]:
-        """Safely reconcile an operation in 'unknown_outcome' state."""
+        """Safely reconcile an operation in 'unknown_outcome' state (crash-safe with WAL).
+
+        Only transition: unknown_outcome → reconciled_completed / reconciled_cancelled / reconciled_failed.
+
+        **Crash-safe WAL Protocol (prevents dual-consumption / lost-reconciliation):**
+          Phase 1 (ledger lock): Validate → write 'reconciling_started' WAL entry
+          Phase 2 (no lock):     Consume the approval (irreversible external state change)
+          Phase 3 (ledger lock): Transition WAL → 'reconciled_*' final state
+
+          If crash after Phase 1 but before Phase 2: WAL rollback → 'unknown_outcome'
+          If crash after Phase 2 but before Phase 3: WAL replay → complete the transition
+
+        **Approval & Evidence Validation (real, not only non-empty):**
+          1-8: Same as before (approval exists, is approved, matches evidence, etc.)
+
+        cancelled/failed reconciliation releases the idempotency lock allowing a new reservation.
+        completed reconciliation is terminal.
+        """
         clean_res = str(resolution or "").lower().strip()
         if clean_res not in ("completed", "failed", "cancelled"):
             raise GuardianError(f"Invalid reconciliation resolution {resolution!r}. Allowed: completed, failed, cancelled.")
 
+        # Validate structured evidence
+        if not evidence or not isinstance(evidence, dict):
+            raise GuardianError(
+                f"Security violation: structured evidence is required for reconciliation of {composite_key!r}."
+            )
+        missing = RECONCILIATION_EVIDENCE_FIELDS - set(evidence.keys())
+        if missing:
+            raise GuardianError(
+                f"Security violation: reconciliation evidence for {composite_key!r} is missing required fields: "
+                f"{', '.join(sorted(missing))}."
+            )
+
+        # Validate approval_id
+        clean_approval = str(approval_id or "").strip()
+        if not clean_approval:
+            raise GuardianError(
+                f"Security violation: approval_id is required for reconciliation of {composite_key!r}."
+            )
+
+        # Extract connector, action from the composite key for cross-field validation
+        key_parts = composite_key.split(":", 2)
+        if len(key_parts) < 3:
+            raise GuardianError(f"Invalid composite key format: {composite_key!r}.")
+        key_connector = key_parts[0]
+        key_action = key_parts[1]
+
+        # --- Cross-field evidence validation (must match the ledger operation) ---
+        ev_connector = str(evidence.get("connector", "")).strip()
+        ev_action = str(evidence.get("action", "")).strip()
+        ev_idempotency_key = str(evidence.get("idempotency_key", "")).strip()
+        ev_approval_id = str(evidence.get("approval_id", "")).strip()
+
+        if ev_connector != key_connector:
+            raise GuardianError(
+                f"Security violation: evidence connector {ev_connector!r} does not match "
+                f"ledger operation connector {key_connector!r} for {composite_key!r}."
+            )
+        if ev_action != key_action:
+            raise GuardianError(
+                f"Security violation: evidence action {ev_action!r} does not match "
+                f"ledger operation action {key_action!r} for {composite_key!r}."
+            )
+        if ev_idempotency_key != composite_key:
+            raise GuardianError(
+                f"Security violation: evidence idempotency_key {ev_idempotency_key!r} does not match "
+                f"ledger operation key {composite_key!r}."
+            )
+        if ev_approval_id != clean_approval:
+            raise GuardianError(
+                f"Security violation: evidence approval_id {ev_approval_id!r} does not match "
+                f"supplied approval_id {clean_approval!r}."
+            )
+
+        # --- Real approval validation via Guardian's approval system ---
+        # Load the approval from the queue
+        approvals = load_approval_queue(brain)
+        approval_entry = next(
+            (a for a in approvals if a.get("id") == clean_approval),
+            None,
+        )
+        if not approval_entry:
+            raise GuardianError(
+                f"Security violation: approval {clean_approval!r} not found in approval queue. "
+                f"Reconciliation of {composite_key!r} requires a valid, pre-approved approval."
+            )
+
+        app_status = approval_entry.get("status", "")
+        if app_status != "approved":
+            raise GuardianError(
+                f"Security violation: approval {clean_approval!r} has status {app_status!r}, "
+                f"not 'approved'. Reconciliation requires an explicitly approved approval."
+            )
+
+        # Validate approval's action matches evidence action
+        app_action = approval_entry.get("action", "")
+        if app_action and app_action != ev_action:
+            raise GuardianError(
+                f"Security violation: approval action {app_action!r} does not match "
+                f"evidence action {ev_action!r}."
+            )
+
+        # Validate approval's connector_scope matches evidence connector
+        app_scope = approval_entry.get("connector_scope", "")
+        effective_scope = account_connector_scope or ev_connector
+        if app_scope and app_scope != effective_scope:
+            raise GuardianError(
+                f"Security violation: approval connector_scope {app_scope!r} does not match "
+                f"evidence connector {effective_scope!r}."
+            )
+
+        # Validate approval's account_id matches evidence account_id
+        app_acc = approval_entry.get("account_id", "")
+        ev_acc = evidence.get("account_id", "")
+        effective_acc = account_id or ev_acc
+        if app_acc and app_acc != effective_acc:
+            raise GuardianError(
+                f"Security violation: approval account_id {app_acc!r} does not match "
+                f"evidence account_id {effective_acc!r}."
+            )
+
+        # ====================================================================
+        # Phase 1: Under ledger lock — write 'reconciling_started' WAL entry
+        # ====================================================================
         lock_p = cls._lock_path(brain)
+        with open(lock_p, "a", encoding="utf-8") as lock_fd:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+            try:
+                ledger = cls.load(brain)
+
+                # Recover any stuck reconciling entries before processing
+                recovered = cls._recover_reconciling_entries(brain, ledger)
+                if recovered > 0:
+                    cls._save_under_lock(brain, ledger)
+
+                entry = ledger.get(composite_key)
+                if not entry:
+                    raise GuardianError(
+                        f"Security violation: ledger entry {composite_key!r} not found during reconciliation."
+                    )
+
+                st = entry.get("status")
+
+                # Only unknown_outcome operations can be reconciled
+                if st != "unknown_outcome":
+                    raise GuardianError(
+                        f"Security violation: only 'unknown_outcome' operations can be reconciled. "
+                        f"Operation {composite_key!r} is in state '{st}'."
+                    )
+
+                # Write the WAL entry (crash-safe point of record)
+                entry["status"] = "reconciling_started"
+                entry["reconciling_resolution"] = clean_res
+                entry["reconciling_approval_id"] = clean_approval
+                entry["reconciling_evidence"] = evidence
+                if receipt:
+                    entry["reconciling_receipt"] = receipt
+                if account_connector_scope:
+                    entry["reconciling_account_connector_scope"] = account_connector_scope
+                if account_id:
+                    entry["reconciling_account_id"] = account_id
+                entry["reconciling_started_at"] = now_utc()
+
+                cls._save_under_lock(brain, ledger)
+            finally:
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+
+        # ====================================================================
+        # Phase 2: No lock — consume the approval (irreversible external state)
+        # ====================================================================
+        # NOTE: idempotency_key is not passed here because the ledger itself
+        # guarantees one-time reconciliation (only unknown_outcome → reconciled).
+        # The approval queue's idempotency check would require matching the
+        # approval's original idempotency_key, which is irrelevant here.
+        consumed = _consume_approval(
+            brain,
+            request_id=clean_approval,
+            action=ev_action,
+            target=composite_key,
+            after_evidence=json.dumps(evidence, sort_keys=True),
+            account_id=effective_acc,
+            connector_scope=effective_scope,
+        )
+
+        # ====================================================================
+        # Phase 3: Under ledger lock — transition 'reconciling_started' → final
+        # ====================================================================
         with open(lock_p, "a", encoding="utf-8") as lock_fd:
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
             try:
                 ledger = cls.load(brain)
                 entry = ledger.get(composite_key)
                 if not entry:
-                    raise GuardianError(f"Idempotent operation {composite_key!r} not found in ledger.")
-
-                st = entry.get("status")
-                now_ts = time.time()
-                reserved_ts = float(entry.get("reserved_timestamp", 0))
-                is_stale_reserved = (st == "reserved") and (now_ts - reserved_ts >= 300)
-
-                if st != "unknown_outcome" and not is_stale_reserved:
                     raise GuardianError(
-                        f"Security violation: live reserved operation {composite_key!r} cannot be reconciled/cancelled without owner token completion or TTL expiration."
+                        f"Security violation: ledger entry {composite_key!r} was removed after WAL write. "
+                        "Consumed approval but ledger state is inconsistent."
                     )
 
+                st = entry.get("status")
+
+                if st != "reconciling_started":
+                    raise GuardianError(
+                        f"Security violation: expected 'reconciling_started' state, "
+                        f"but operation {composite_key!r} is in state '{st}'."
+                    )
 
                 if clean_res == "completed":
                     final_receipt = receipt or {
@@ -283,17 +772,34 @@ class IdempotencyLedger:
                         "reconciled_at": now_utc(),
                         "reason": resolution_reason,
                     }
-                    entry["status"] = "completed"
+                    entry["status"] = "reconciled_completed"
                     entry["completed_at"] = now_utc()
                     entry["receipt"] = final_receipt
-                    entry["reconciliation_reason"] = resolution_reason
-                else:
-                    del ledger[composite_key]
-                    cls._save_under_lock(brain, ledger)
-                    return {"composite_key": composite_key, "status": clean_res, "reconciled": True}
+                elif clean_res == "cancelled":
+                    entry["status"] = "reconciled_cancelled"
+                else:  # failed
+                    entry["status"] = "reconciled_failed"
+
+                entry["reconciliation_reason"] = resolution_reason
+                entry["reconciliation_evidence"] = evidence
+                entry["reconciliation_approval_id"] = clean_approval
+                entry["reconciliation_consumption"] = consumed
+                entry["reconciled_at"] = now_utc()
+
+                # Clean up WAL fields
+                for wal_key in ("reconciling_resolution", "reconciling_approval_id", "reconciling_evidence",
+                                "reconciling_receipt", "reconciling_account_connector_scope", "reconciling_account_id",
+                                "reconciling_started_at"):
+                    entry.pop(wal_key, None)
 
                 cls._save_under_lock(brain, ledger)
-                return entry
+                return {
+                    "composite_key": composite_key,
+                    "status": f"reconciled_{clean_res}",
+                    "reconciled": True,
+                    "approval_consumed": True,
+                    "consumption_status": consumed.get("status", "consumed"),
+                }
             finally:
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
 
@@ -353,11 +859,32 @@ def reconcile_connector_outcome(
     idempotency_key: str,
     resolution: str,
     resolution_reason: str,
+    evidence: dict[str, Any],
+    approval_id: str,
     receipt: dict[str, Any] | None = None,
+    *,
+    account_connector_scope: str | None = None,
+    account_id: str | None = None,
 ) -> dict[str, Any]:
-    """Top-level helper to reconcile an operation in unknown_outcome state."""
+    """Top-level helper to reconcile an operation in unknown_outcome state.
+
+    Requires structured evidence dict with all RECONCILIATION_EVIDENCE_FIELDS and
+    a non-empty approval_id. The approval is validated against Guardian's approval
+    queue (must be 'approved') and then consumed after all evidence checks pass.
+
+    account_connector_scope and account_id are used for cross-validation against
+    the approval record.
+
+    cancelled/failed reconciliation releases the lock for retry.
+    completed reconciliation is terminal.
+    """
     comp_key = f"{connector_name}:{action}:{idempotency_key}"
-    return IdempotencyLedger.reconcile(brain, comp_key, resolution, resolution_reason, receipt=receipt)
+    return IdempotencyLedger.reconcile(
+        brain, comp_key, resolution, resolution_reason, evidence, approval_id,
+        receipt=receipt,
+        account_connector_scope=account_connector_scope,
+        account_id=account_id,
+    )
 
 
 class BaseConnector(ABC):
