@@ -80,7 +80,9 @@ from guardian_agent.browser_operator import (
     execute_browser_action,
     get_takeover_status,
     inspect_web_page,
+    list_browser_unknown_outcomes,
     pause_for_takeover,
+    reconcile_browser_unknown,
     resume_takeover,
 )
 
@@ -140,6 +142,20 @@ from guardian_agent.jcode import (
     jcode_opt_in,
     jcode_parallel_run,
     jcode_status,
+)
+
+from guardian_agent.hermes import (
+    create_hermes_handoff,
+    execute_hermes_task,
+    hermes_is_opted_in,
+    hermes_list_scheduled,
+    hermes_opt_in,
+    hermes_run_due_tasks,
+    hermes_schedule_task,
+    hermes_status,
+    hermes_unschedule_task,
+    import_hermes_lesson,
+    list_hermes_memory,
 )
 
 from guardian_agent.orchestration import (
@@ -509,6 +525,21 @@ def build_parser() -> argparse.ArgumentParser:
     b_tk_cancel.add_argument("--project", default=".", type=_project_path)
     b_tk_cancel.add_argument("--account-id", required=True)
 
+    b_reconcile = browser_sub.add_parser("reconcile", help="List or resolve browser unknown-outcome operations")
+    b_reconcile_sub = b_reconcile.add_subparsers(dest="reconcile_command", required=True)
+    b_rec_list = b_reconcile_sub.add_parser("list", help="List browser operations in unknown_outcome state")
+    b_rec_list.add_argument("--project", default=".", type=_project_path)
+    b_rec_list.add_argument("--account-id", help="Optional filter by account ID")
+    b_rec_resolve = b_reconcile_sub.add_parser("resolve", help="Reconcile a browser unknown outcome")
+    b_rec_resolve.add_argument("--project", default=".", type=_project_path)
+    b_rec_resolve.add_argument("--account-id", required=True)
+    b_rec_resolve.add_argument("--action", required=True, help="The browser action (e.g. submit, publish)")
+    b_rec_resolve.add_argument("--url", required=True, help="The target URL")
+    b_rec_resolve.add_argument("--resolution", required=True, choices=["completed", "cancelled", "failed"])
+    b_rec_resolve.add_argument("--resolution-reason", required=True)
+    b_rec_resolve.add_argument("--approval-id", required=True)
+    b_rec_resolve.add_argument("--evidence", default='{}', help="JSON evidence object")
+
 
 
     council_p = subparsers.add_parser("council", help="Run an opt-in multi-model analysis council")
@@ -545,6 +576,57 @@ def build_parser() -> argparse.ArgumentParser:
     jcode_prepare.add_argument("--task", required=True)
     jcode_prepare.add_argument("--writable-path", action="append", default=[], help="Exact writable file/directory path (repeatable)")
     jcode_prepare.add_argument("--test-command", help="Test command for verification")
+
+    # Hermes (Phase 5 + Phase 6)
+    hermes_p = subparsers.add_parser("hermes", help="Optional learning/research worker with tools-disabled profile (Phase 5 & 6)")
+    hermes_sub = hermes_p.add_subparsers(dest="hermes_command", required=True)
+
+    hermes_status_p = hermes_sub.add_parser("status", help="Detect Hermes binary and read version with timeout")
+    hermes_status_p.add_argument("--project", default=".", type=_project_path)
+
+    hermes_optin_p = hermes_sub.add_parser("opt-in", help="Enable Hermes execution with tools-disabled profile")
+    hermes_optin_p.add_argument("--project", default=".", type=_project_path)
+
+    hermes_prepare = hermes_sub.add_parser("prepare", help="Build a compact, tools-disabled Hermes handoff (dry-run)")
+    hermes_prepare.add_argument("--project", default=".", type=_project_path)
+    hermes_prepare.add_argument("--task", required=True)
+    hermes_prepare.add_argument("--task-type", choices=["research", "planning", "skill-evaluation", "summary"], default="research")
+    hermes_prepare.add_argument("--read-path", action="append", default=[], help="Read-only path (repeatable)")
+
+    hermes_run_p = hermes_sub.add_parser("run", help="Execute a bounded Hermes research/learning task (tools-disabled)")
+    hermes_run_p.add_argument("--project", default=".", type=_project_path)
+    hermes_run_p.add_argument("--task", required=True)
+    hermes_run_p.add_argument("--task-type", choices=["research", "planning", "skill-evaluation", "summary"], default="research")
+    hermes_run_p.add_argument("--timeout", type=int, default=300)
+
+    hermes_mem = hermes_sub.add_parser("memory", help="List Hermes isolated memory (separate from Guardian)")
+    hermes_mem.add_argument("--project", default=".", type=_project_path)
+
+    hermes_import = hermes_sub.add_parser("import-lesson", help="Import a user-approved, sanitized lesson from Hermes memory into Guardian")
+    hermes_import.add_argument("--project", default=".", type=_project_path)
+    hermes_import.add_argument("--source", required=True, help="File name in Hermes memory")
+    hermes_import.add_argument("--pattern", required=True, help="Sanitized reusable pattern")
+    hermes_import.add_argument("--prevention", required=True, help="Sanitized prevention check")
+    hermes_import.add_argument("--tag", action="append", required=True, dest="tags")
+
+    hermes_sched = hermes_sub.add_parser("schedule", help="Add a Guardian-scheduled Hermes background task (requires approval)")
+    hermes_sched.add_argument("--project", default=".", type=_project_path)
+    hermes_sched.add_argument("--task-type", choices=["health-check", "research-summary", "skill-evaluation", "maintenance-proposal"], required=True)
+    hermes_sched.add_argument("--description", required=True)
+    hermes_sched.add_argument("--interval", type=int, required=True, help="Interval in seconds (minimum 300)")
+    hermes_sched.add_argument("--approval-id", required=True)
+
+    hermes_list_sched = hermes_sub.add_parser("list-scheduled", help="List scheduled Hermes background tasks")
+    hermes_list_sched.add_argument("--project", default=".", type=_project_path)
+
+    hermes_unsched = hermes_sub.add_parser("unschedule", help="Disable a scheduled Hermes task")
+    hermes_unsched.add_argument("--project", default=".", type=_project_path)
+    hermes_unsched.add_argument("--task-id", required=True)
+
+    hermes_run_due = hermes_sub.add_parser("run-due", help="Run due scheduled Hermes tasks (no external actions)")
+    hermes_run_due.add_argument("--project", default=".", type=_project_path)
+    hermes_run_due.add_argument("--max-tasks", type=int, default=5)
+    hermes_run_due.add_argument("--force", action="store_true", help="Run all enabled tasks regardless of schedule")
     jcode_command = jcode_sub.add_parser("command", help="Preview the safe JCode command without executing it")
     jcode_command.add_argument("--project", default=".", type=_project_path)
     jcode_command.add_argument("--task", required=True)
@@ -1451,6 +1533,24 @@ def main(argv: list[str] | None = None) -> int:
                 elif args.takeover_command == "cancel":
                     print(json.dumps(cancel_takeover(brain, args.account_id), indent=2))
 
+            elif args.browser_command == "reconcile":
+                if args.reconcile_command == "list":
+                    result = list_browser_unknown_outcomes(brain, account_id=args.account_id)
+                    print(json.dumps(result, indent=2, default=str))
+                elif args.reconcile_command == "resolve":
+                    evidence = json.loads(args.evidence)
+                    result = reconcile_browser_unknown(
+                        brain,
+                        account_id=args.account_id,
+                        action=args.action,
+                        target_url=args.url,
+                        resolution=args.resolution,
+                        resolution_reason=args.resolution_reason,
+                        evidence=evidence,
+                        approval_id=args.approval_id,
+                    )
+                    print(json.dumps(result, indent=2, default=str))
+
             return 0
 
 
@@ -1510,6 +1610,68 @@ def main(argv: list[str] | None = None) -> int:
                 if len(args.tasks) < 1 or len(args.tasks) > 2:
                     print(json.dumps({"error": "Provide 1-2 tasks for parallel execution."}, indent=2))
                     return 1
+            if args.command == "hermes":
+                if args.hermes_command == "status":
+                    print(json.dumps(hermes_status(), indent=2))
+                    return 0
+                if args.hermes_command == "opt-in":
+                    result = hermes_opt_in(brain)
+                    print(json.dumps(result, indent=2))
+                    return 0
+                if args.hermes_command == "prepare":
+                    result = create_hermes_handoff(
+                        brain, args.task,
+                        task_type=args.task_type,
+                        read_paths=args.read_path or None,
+                    )
+                    print(json.dumps(result, indent=2))
+                    return 0
+                if args.hermes_command == "run":
+                    result = execute_hermes_task(
+                        brain, args.task,
+                        task_type=args.task_type,
+                        timeout=args.timeout,
+                    )
+                    print(json.dumps(result, indent=2))
+                    return 0
+                if args.hermes_command == "memory":
+                    result = list_hermes_memory(brain)
+                    print(json.dumps(result, indent=2))
+                    return 0
+                if args.hermes_command == "import-lesson":
+                    result = import_hermes_lesson(
+                        brain, args.source,
+                        sanitized_pattern=args.pattern,
+                        sanitized_prevention=args.prevention,
+                        tags=args.tags,
+                    )
+                    print(json.dumps(result, indent=2))
+                    return 0
+                if args.hermes_command == "schedule":
+                    result = hermes_schedule_task(
+                        brain, args.task_type, args.description,
+                        interval_seconds=args.interval,
+                        approval_id=args.approval_id,
+                    )
+                    print(json.dumps(result, indent=2))
+                    return 0
+                if args.hermes_command == "list-scheduled":
+                    result = hermes_list_scheduled(brain)
+                    print(json.dumps(result, indent=2))
+                    return 0
+                if args.hermes_command == "unschedule":
+                    result = hermes_unschedule_task(brain, args.task_id)
+                    print(json.dumps(result, indent=2))
+                    return 0
+                if args.hermes_command == "run-due":
+                    result = hermes_run_due_tasks(
+                        brain,
+                        max_tasks=args.max_tasks,
+                        force=args.force,
+                    )
+                    print(json.dumps(result, indent=2))
+                    return 0
+
                 task_packages = []
                 for t in args.tasks:
                     task_packages.append({

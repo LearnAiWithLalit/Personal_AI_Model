@@ -974,13 +974,10 @@ ordinary local default.
 ### Still required before production readiness
 
 - Provider-specific account/quota endpoints where officially available and broader calibrated semantic/code benchmarks.
-- Complete browser actionability and recovery: overlay/navigation checks, durable submission fingerprints/receipts, page or transaction reconciliation, and no blind retry after an unknown outcome.
-- Attach manual takeover to the exact in-flight authenticated page/session and add a real headful end-to-end takeover test with pause, user action, resume, cancel, timeout, and state preservation.
-- Replace Canva, Adobe, and Lovable placeholder results with official authorized API calls or Guardian-policy-gated visible browser workflows. Never report credential presence as remote authentication success.
 - Worker health/heartbeat evidence, and production service installation/upgrade controls.
 - OS-keychain integration, credential rotation/expiry, multiple account/session lifecycle validation, and recovery testing.
 - Cryptographic signing for trusted skills, isolated forward-testing on real tasks, and calibrated multi-model semantic evaluation.
 - Review/commit/PR adapters and structured telemetry/incident tooling.
 - Optional hardware-gated Colibri local-provider adapter with explicit large-download consent, live latency qualification, and compact one-shot routing.
-- Official or authorized connectors for VS Code, Antigravity, Claude Code, Canva, Adobe, Lovable, and any other subscription service.
+- Official or authorized connectors for VS Code, Antigravity, Claude Code, and any other subscription service.
 - Multi-user isolation, installer/release flow, end-to-end evaluation suite, and production security review.

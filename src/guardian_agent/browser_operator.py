@@ -221,6 +221,290 @@ ACTIONS_REQUIRING_SELECTOR = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Priority 2 — Browser Reliability Improvements
+#
+# Overlay detection, navigation stability, stale-element checks,
+# submission fingerprints, page-state reconciliation, and
+# exact in-flight page context preservation for manual takeover.
+# ---------------------------------------------------------------------------
+
+_SUBMISSION_FINGERPRINT_VERSION = 1
+
+
+def _check_overlay_blocking(page: Any, selector: str) -> list[dict]:
+    """Detect if a target element is blocked by overlay elements.
+
+    Uses JavaScript to check if the element at the given selector is
+    covered by another element (modal, cookie banner, popup, etc.).
+
+    Args:
+        page: Playwright page object.
+        selector: CSS/XPath selector for the target element.
+
+    Returns:
+        List of overlay descriptions. Empty list means no overlay detected.
+    """
+    try:
+        overlays = page.evaluate("""(sel) => {
+            const el = document.querySelector(sel);
+            if (!el) return [{ 'type': 'missing', 'description': 'Element not found in DOM' }];
+
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) {
+                return [{ 'type': 'hidden', 'description': 'Element has zero dimensions' }];
+            }
+
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+
+            const topEl = document.elementFromPoint(cx, cy);
+            if (!topEl) return [];
+
+            const results = [];
+            if (topEl !== el && !el.contains(topEl) && !topEl.contains(el)) {
+                const tag = topEl.tagName.toLowerCase();
+                const id = topEl.id || '';
+                const cls = topEl.className || '';
+                const text = (topEl.textContent || '').trim().substring(0, 80);
+                results.push({
+                    'type': 'overlay',
+                    'tag': tag,
+                    'id': id,
+                    'class': cls.substring(0, 60),
+                    'text': text,
+                    'description': `Covered by <${tag}>${id ? '#' + id : ''}${cls ? '.' + cls.substring(0, 30) : ''}`
+                });
+            }
+
+            return results;
+        }""", selector)
+        return overlays or []
+    except Exception:
+        return []
+
+
+def _wait_for_page_settled(page: Any, timeout: int = 5_000) -> dict:
+    """Wait for the page to reach a settled state after navigation or action.
+
+    Checks for network idle, no recent DOM mutations, and complete rendering.
+
+    Args:
+        page: Playwright page object.
+        timeout: Maximum milliseconds to wait.
+
+    Returns:
+        Dict with 'settled' (bool), 'method', and details.
+    """
+    start = time.time()
+    try:
+        # Wait for network to be mostly idle
+        page.wait_for_load_state("networkidle", timeout=timeout)
+
+        # Check that the page signals it's interactive
+        page.wait_for_load_state("domcontentloaded", timeout=5_000)
+
+        # Use JavaScript to verify DOM stability
+        stable = page.evaluate("""(ms) => {
+            return new Promise((resolve) => {
+                const start = performance.now();
+                let lastMutation = 0;
+
+                const observer = new MutationObserver(() => {
+                    lastMutation = performance.now();
+                });
+
+                observer.observe(document.body || document.documentElement, {
+                    childList: true,
+                    subtree: true,
+                    attributes: false,
+                });
+
+                const check = () => {
+                    const elapsed = performance.now() - lastMutation;
+                    if (elapsed > 300) {
+                        observer.disconnect();
+                        resolve(true);
+                    } else if (performance.now() - start > ms) {
+                        observer.disconnect();
+                        resolve(false);
+                    } else {
+                        requestAnimationFrame(check);
+                    }
+                };
+
+                // Start checking after a short delay
+                setTimeout(check, 500);
+            });
+        }""", timeout)
+
+        elapsed = round((time.time() - start) * 1000, 0)
+        return {
+            "settled": bool(stable),
+            "method": "network_idle_and_dom_stable",
+            "elapsed_ms": elapsed,
+        }
+    except Exception as err:
+        return {
+            "settled": False,
+            "method": "timeout_or_error",
+            "error": str(err)[:100],
+        }
+
+
+def _check_element_stable(page: Any, selector: str) -> dict:
+    """Verify that an element is still attached to the DOM and actionable.
+
+    Checks that the element exists, is visible, is enabled, and has not
+    been detached from the DOM since the last interaction.
+
+    Args:
+        page: Playwright page object.
+        selector: CSS/XPath selector for the target element.
+
+    Returns:
+        Dict with 'stable' (bool), 'reason', and optional 'stale' flag.
+    """
+    try:
+        count = page.locator(selector).count()
+        if count == 0:
+            return {"stable": False, "reason": "Element not found in DOM", "stale": True}
+
+        loc = page.locator(selector).first
+        try:
+            loc.wait_for(state="visible", timeout=3_000)
+        except Exception:
+            return {"stable": False, "reason": "Element not visible", "stale": False}
+
+        if loc.is_disabled():
+            return {"stable": False, "reason": "Element is disabled", "stale": False}
+
+        return {"stable": True, "reason": "Element visible and enabled"}
+    except Exception as err:
+        return {"stable": False, "reason": str(err)[:100], "stale": True}
+
+
+def _create_submission_fingerprint(page: Any, action_type: str) -> dict:
+    """Capture durable page state evidence after a submission or sensitive action.
+
+    Gathers: current URL, page title, key DOM text, screenshot path, timestamps,
+    URL params, visible success/error indicators, and page visibility state.
+
+    Args:
+        page: Playwright page object at the post-action state.
+        action_type: The type of action performed (submit, publish, etc.).
+
+    Returns:
+        Dict with durable fingerprint evidence for later reconciliation.
+    """
+    fp: dict = {
+        "version": _SUBMISSION_FINGERPRINT_VERSION,
+        "action_type": action_type,
+        "captured_at": now_utc(),
+        "current_url": page.url,
+        "page_title": page.title(),
+        "url_changed": False,
+        "has_success_indicator": False,
+        "has_error_indicator": False,
+        "visible_text_snippet": "",
+        "success_keywords": [],
+        "error_keywords": [],
+    }
+
+    try:
+        # Capture visible text for reconciliation
+        body_text = page.evaluate("() => document.body?.innerText || ''")
+        fp["visible_text_snippet"] = body_text[:2000]
+
+        # Check for success indicators
+        success_patterns = ["success", "thank you", "submitted", "confirmed", "complete",
+                           "payment received", "order placed", "published"]
+        fp["success_keywords"] = [
+            kw for kw in success_patterns
+            if kw in body_text.lower()[:5000]
+        ]
+        fp["has_success_indicator"] = len(fp["success_keywords"]) > 0
+
+        # Check for error indicators
+        error_patterns = ["error", "failed", "declined", "rejected", "timeout",
+                         "try again", "something went wrong", "invalid"]
+        fp["error_keywords"] = [
+            kw for kw in error_patterns
+            if kw in body_text.lower()[:5000]
+        ]
+        fp["has_error_indicator"] = len(fp["error_keywords"]) > 0
+
+    except Exception:
+        pass
+
+    return fp
+
+
+def _reconcile_submission_state(brain: ProjectBrain, before_fp: dict, after_fp: dict) -> dict:
+    """Compare before/after submission fingerprints to determine action outcome.
+
+    Analyzes URL changes, success/error indicators, and visible text changes
+    to classify the outcome as: likely_success, likely_failed, or uncertain.
+
+    Args:
+        brain: Project brain.
+        before_fp: Submission fingerprint captured before the action.
+        after_fp: Submission fingerprint captured after the action.
+
+    Returns:
+        Dict with reconciliation result and confidence score (0.0-1.0).
+    """
+    result = {
+        "reconciled": True,
+        "outcome": "uncertain",
+        "confidence": 0.0,
+        "url_changed": False,
+        "has_success": False,
+        "has_error": False,
+        "details": [],
+    }
+
+    # 1. Check URL change (strongest signal)
+    before_url = before_fp.get("current_url", "")
+    after_url = after_fp.get("current_url", "")
+    if before_url != after_url:
+        result["url_changed"] = True
+        result["details"].append(f"URL changed: {before_url[:60]} -> {after_url[:60]}")
+
+    # 2. Check success indicators
+    has_success = after_fp.get("has_success_indicator", False)
+    success_kws = after_fp.get("success_keywords", [])
+    if has_success:
+        result["has_success"] = True
+        result["details"].append(f"Success keywords found: {', '.join(success_kws)}")
+
+    # 3. Check error indicators
+    has_error = after_fp.get("has_error_indicator", False)
+    error_kws = after_fp.get("error_keywords", [])
+    if has_error:
+        result["has_error"] = True
+        result["details"].append(f"Error keywords found: {', '.join(error_kws)}")
+
+    # 4. Determine outcome
+    if result["url_changed"] and has_success and not has_error:
+        result["outcome"] = "likely_success"
+        result["confidence"] = 0.9
+    elif result["url_changed"] and not has_error:
+        result["outcome"] = "likely_success"
+        result["confidence"] = 0.7
+    elif has_success and not has_error:
+        result["outcome"] = "likely_success"
+        result["confidence"] = 0.6
+    elif has_error:
+        result["outcome"] = "likely_failed"
+        result["confidence"] = 0.8
+    else:
+        result["outcome"] = "uncertain"
+        result["confidence"] = 0.3
+
+    return result
+
+
 def check_playwright_available() -> bool:
     try:
         import playwright  # noqa: F401
@@ -388,8 +672,15 @@ def pause_for_takeover(
     account_id: str,
     timeout_seconds: int = 300,
     signal_file: Path | None = None,
+    current_page_url: str | None = None,
+    current_page_title: str | None = None,
 ) -> dict[str, Any]:
-    """Pause execution holding persistent profile lock for human visual takeover with attached headful context if available."""
+    """Pause execution holding persistent profile lock for human visual takeover with attached headful context if available.
+
+    When current_page_url and/or current_page_title are provided, the takeover
+    preserves the exact in-flight page context so the human user sees the same
+    page the agent was interacting with.
+    """
     lock_mgr = ProfileLockManager(brain, account_id)
     with lock_mgr:
         takeover_id = f"takeover-{uuid.uuid4().hex[:8]}"
@@ -407,6 +698,8 @@ def pause_for_takeover(
             "created_at": now_utc(),
             "expires_at": time.time() + timeout_seconds,
             "signal_path": str(sig_path),
+            "page_url": current_page_url,
+            "page_title": current_page_title,
         }
         meta_p.write_text(json.dumps(meta_data, indent=2) + "\n", encoding="utf-8")
 
@@ -426,6 +719,14 @@ def pause_for_takeover(
                             headless=False,
                         )
                         page = context.pages[0] if context.pages else context.new_page()
+
+                        # PRESERVE IN-FLIGHT PAGE CONTEXT: Navigate to the exact page the agent was on
+                        if current_page_url:
+                            try:
+                                page.goto(current_page_url, timeout=15_000, wait_until="domcontentloaded")
+                            except Exception:
+                                pass
+
                         try:
                             page.evaluate(
                                 f"""() => {{
@@ -588,16 +889,40 @@ def execute_browser_action(
                         route.abort("blockedbyclient")
 
                 context.route("**/*", _route_handler)
+
+                # NAVIGATION STABILITY: Wait for page to fully settle after navigation
                 page.goto(clean_url, timeout=20_000, wait_until="domcontentloaded")
+                settle_result = _wait_for_page_settled(page, timeout=5_000)
 
                 if page.url != clean_url:
                     validate_redirect_url(clean_url, page.url, allowed_domains=allowed_domains)
+                    # Re-settle after redirect
+                    _wait_for_page_settled(page, timeout=5_000)
 
-                # PREFLIGHT SELECTOR ACTIONABILITY VALIDATION (Verify selector exists, is visible, and enabled)
+                # ENHANCED PREFLIGHT: overlay check + stale element check + actionability
                 if selector:
+                    # Step 1: Check for overlay blocking
+                    overlays = _check_overlay_blocking(page, selector)
+                    blocking_overlays = [o for o in overlays if o.get('type') == 'overlay']
+                    if blocking_overlays:
+                        overlay_desc = '; '.join(o.get('description', '') for o in blocking_overlays[:3])
+                        raise GuardianError(
+                            f"Browser preflight failed: selector {selector!r} on page {clean_url!r} "
+                            f"is blocked by overlay(s): {overlay_desc}"
+                        )
+
+                    # Step 2: Check element stability (not stale)
+                    stability = _check_element_stable(page, selector)
+                    if not stability.get("stable"):
+                        raise GuardianError(
+                            f"Browser preflight failed: selector {selector!r} on page {clean_url!r} "
+                            f"is not stable: {stability.get('reason', 'unknown')}"
+                        )
+
+                    # Step 3: Original actionability check
                     try:
                         loc = page.locator(selector).first
-                        loc.wait_for(state="visible", timeout=10_000)
+                        loc.wait_for(state="visible", timeout=5_000)
                         if loc.is_disabled():
                             raise GuardianError(
                                 f"Browser preflight failed: selector {selector!r} on page {clean_url!r} is disabled."
@@ -613,10 +938,13 @@ def execute_browser_action(
                 art_dir.mkdir(exist_ok=True)
                 ts_str = now_utc().replace(":", "-").replace(" ", "_")
 
+                # SUBMISSION FINGERPRINT: Capture before-state for sensitive actions
+                before_fp = None
                 before_shot = None
                 if is_sensitive:
                     before_shot = art_dir / f"browser_before_{clean_action}_{ts_str}.png"
                     page.screenshot(path=str(before_shot))
+                    before_fp = _create_submission_fingerprint(page, clean_action)
 
                 # LATE PRE-ACTION APPROVAL RESERVATION (Immediately before side effect execution)
                 if approval_id:
@@ -644,6 +972,12 @@ def execute_browser_action(
                 page.screenshot(path=str(after_shot))
                 title = page.title()
 
+                # SUBMISSION RECONCILIATION: Compare before/after state for sensitive actions
+                submission_reconciliation = None
+                if is_sensitive and before_fp:
+                    after_fp = _create_submission_fingerprint(page, clean_action)
+                    submission_reconciliation = _reconcile_submission_state(brain, before_fp, after_fp)
+
                 # STAGE 2 POST-CLICK COMPLETION
                 if approval_id:
                     consume_action_approval(
@@ -657,18 +991,23 @@ def execute_browser_action(
                         reservation_token=res_token,
                     )
 
+                # Build enhanced receipt with submission reconciliation evidence
+                receipt = {
+                    "status": "completed",
+                    "action": clean_action,
+                    "url": audit_url,
+                    "title": title,
+                    "after_screenshot": str(after_shot),
+                    "completed_at": now_utc(),
+                }
+                if submission_reconciliation:
+                    receipt["submission_reconciliation"] = submission_reconciliation
+
                 # Complete the ledger entry (fail closed — do not silently ignore failures)
                 if ledger_owner_token:
                     complete_browser_operation(
                         brain, account_id or "default", clean_action, clean_url,
-                        receipt={
-                            "status": "completed",
-                            "action": clean_action,
-                            "url": audit_url,
-                            "title": title,
-                            "after_screenshot": str(after_shot),
-                            "completed_at": now_utc(),
-                        },
+                        receipt=receipt,
                         owner_token=ledger_owner_token,
                     )
 

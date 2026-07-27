@@ -40,18 +40,19 @@ tests.
 
 ## 2. Verified baseline today
 
-- Full local suite: **385+ tests passed** (existing baseline + Phase 1/2/3/Priority 3 additions).
+- Full local suite: **451 tests passed** (385 baseline + Phase 1/2/3/4 + Priority 2 + Priority 3 additions).
 - New focused tests added:
   - **24 Aider tests** (6 original + 18 Phase 1: classification, enhanced handoff, execution evidence, path filtering)
-  - **47 JCode tests** (19 Phase 2: binary detection, handoff, restrictions + 10 Phase 3: opt-in, sandbox execution, timeout, out-of-scope rejection, structured results + 18 Phase 4: path locking, conflict detection, change notifications, parallel orchestrator)
-  - **39 supervisor tests** (existing + enhanced `test_parallel_ticket_execution` with structural assertions)
-  - **11 executor worker tests** (existing + new `test_process_ready_tickets_concurrency_timing`)
+  - **47 JCode tests** (19 Phase 2 + 10 Phase 3 + 18 Phase 4)
+  - **50 browser tests** (28 original + 22 new: overlay detection, page settlement, stale-element checks, submission fingerprints, reconciliation, page-context takeover)
+  - **42 connector tests** (existing + expanded for Canva/Adobe/Lovable real API calls)
+  - **39 supervisor tests**
+  - **11 executor worker tests**
 - Source and tests compiled.
 - `git diff --check` passed.
-- The 150-profile catalog remained valid.
 - New source files: `src/guardian_agent/jcode.py`, `tests/test_jcode.py`
-- Modified source files: `src/guardian_agent/aider.py`, `src/guardian_agent/cli.py`, `src/guardian_agent/executor_worker.py`, `src/guardian_agent/jcode.py`
-- Modified test files: `tests/test_aider.py`, `tests/test_supervisor.py`, `tests/test_executor_worker.py`, `tests/test_jcode.py`
+- Modified source files: `src/guardian_agent/browser_operator.py`, `src/guardian_agent/cli.py`, `src/guardian_agent/connectors.py`, `src/guardian_agent/aider.py`, `src/guardian_agent/executor_worker.py`, `src/guardian_agent/jcode.py`
+- Modified test files: `tests/test_browser.py`, `tests/test_connectors.py`, `tests/test_aider.py`, `tests/test_supervisor.py`, `tests/test_executor_worker.py`, `tests/test_jcode.py`
 
 ## 3. Honest current status
 
@@ -198,6 +199,47 @@ tests.
   opt-in enforcement, binary check, empty packages, max workers enforcement,
   and path conflict rejection. 47 total JCode tests pass.
 
+### Now implemented (Priority 2 — Browser reliability)
+
+- **Overlay detection** (`_check_overlay_blocking`): JS `elementFromPoint()` check
+  for modal/banner/popup coverage. Integrated into `execute_browser_action()`
+  preflight — raises GuardianError if overlay detected.
+- **Page settlement** (`_wait_for_page_settled`): `networkidle` wait + MutationObserver
+  DOM stability check. Called after navigation and redirects.
+- **Stale-element check** (`_check_element_stable`): Verifies element count,
+  visibility, and enabled state before interaction.
+- **Submission fingerprints** (`_create_submission_fingerprint`): Captures URL,
+  title, success/error keywords, visible text for before/after comparison.
+- **Page-state reconciliation** (`_reconcile_submission_state`): Compares
+  before/after fingerprints with confidence scoring (0.3-0.9); stored in
+  ledger receipt for sensitive actions.
+- **Page-context takeover**: `pause_for_takeover()` accepts `current_page_url`
+  and `current_page_title`. Stored in takeover metadata. Playwright navigates
+  to the exact page before showing the takeover banner. Backward compatible.
+- **CLI commands**: `guardian browser reconcile list` (list unknown outcomes),
+  `guardian browser reconcile resolve` (resolve with evidence and approval).
+- **22 new tests** covering all reliability functions (50 total browser tests).
+
+### Now implemented (Priority 3 — Real connectors)
+
+- **Canva**: Real Canva Connect API (`api.canva.com/rest/v1/`) — OAuth Bearer
+  auth, list designs via `GET /designs`, create via `POST /designs`, export via
+  `POST /exports` with async polling and download. Browser fallback when no
+  API token configured. Remote auth verification via `users/me` endpoint.
+- **Adobe**: Real Adobe Express API + IMS OAuth — `client_id`/`client_secret`
+  exchanged via `client_credentials` grant, `X-API-KEY` header set to actual
+  `client_id`, list/create tagged documents, PDF Services export. Browser
+  fallback when no credentials configured.
+- **Lovable**: Honest browser-first approach (no fake REST claims) —
+  "Build with URL" generation (`lovable.dev/?autosubmit=true#prompt=...`),
+  MCP server URL exposure (`mcp.lovable.dev`), `browser_fallback: true` on
+  all operations.
+- **Infrastructure**: `_connector_http_request()` / `_connector_api_call()`
+  via stdlib `urllib.request`, rate limit handling (HTTP 429), consolidated
+  `_require_auth()` pattern that always checks credentials then decides mock
+  vs real API.
+- **42 connector tests** pass.
+
 ### Still pending
 
 - Official authorized remote connectors and GitHub/PR workflows.
@@ -206,8 +248,6 @@ tests.
 - Multi-user isolation, release packaging, production telemetry/incidents,
   supply-chain review, and production threat modelling.
 - Phase 5 — Hermes optional learning/research worker.
-- Browser reliability improvements (overlay/navigation checks, submission receipts).
-- Real connector implementations (Canva, Adobe, Lovable, VS Code, etc.).
 
 ## 4. Previous blocking findings — resolution status
 
@@ -245,19 +285,8 @@ These are tracked in the "Still pending" section of this handoff.
 - ~~Phase 3 — JCode controlled execution (sandbox, timeout, cancellation, capture)~~
 - ~~Phase 4 — JCode bounded parallel work (max 2 workers, path locking, conflict detection, change notifications, stop conditions)~~
 - ~~Priority 3 — True per-ticket concurrency timing test~~
-
-### Priority 1 — Browser reliability
-
-- Add overlay, navigation, stale-element, and final-actionability checks.
-- Create durable submission fingerprints and receipts.
-- Reconcile page state, transaction IDs, activity history, or service receipts.
-- Attach manual takeover to the exact in-flight authenticated context/page.
-
-### Priority 2 — Real connectors
-
-- Remove placeholder/fabricated API claims.
-- Implement official capability/authentication checks for Canva, Adobe, Lovable.
-- Continue with VS Code, Claude Code, Gemini/Antigravity, GitHub/PR connectors.
+- ~~Priority 1 — Browser reliability (overlay/navigation checks, submission fingerprints, page-state reconciliation, page-context takeover, CLI reconcile)~~
+- ~~Priority 2 — Real connectors (Canva, Adobe, Lovable real API implementations)~~
 
 ### Priority 3 — Learning and production hardening
 

@@ -586,5 +586,429 @@ class BrowserOperatorTests(unittest.TestCase):
         self.assertEqual(ledger2[key]["status"], "completed")
 
 
+# =====================================================================
+# Priority 2 — Browser Reliability Function Tests
+# =====================================================================
+
+
+class BrowserReliabilityTests(unittest.TestCase):
+    """Unit tests for the browser reliability helper functions.
+
+    These functions (_check_overlay_blocking, _wait_for_page_settled,
+    _check_element_stable, _create_submission_fingerprint, and
+    _reconcile_submission_state) operate on page objects or plain dicts.
+    Since Playwright is not available in the test environment, we use
+    mock page objects via MagicMock when a Playwright page is required.
+    """
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name) / "demo"
+        self.brain = initialize(self.root, "Browser Demo", "Browser reliability test")
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    # -------------------------------------------------------------------
+    # _check_overlay_blocking tests
+    # -------------------------------------------------------------------
+
+    def test_check_overlay_blocking_detects_overlay(self) -> None:
+        """Verify overlay detection identifies a blocking element."""
+        from unittest.mock import MagicMock
+        from guardian_agent.browser_operator import _check_overlay_blocking
+
+        mock_page = MagicMock()
+        # Simulate an overlay covering the target element
+        mock_page.evaluate.return_value = [
+            {
+                "type": "overlay",
+                "tag": "div",
+                "id": "cookie-banner",
+                "class": "banner",
+                "text": "Accept cookies",
+                "description": "Covered by <div>#cookie-banner.banner",
+            }
+        ]
+
+        result = _check_overlay_blocking(mock_page, "#submit-button")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["type"], "overlay")
+        self.assertIn("cookie-banner", str(result))
+        mock_page.evaluate.assert_called_once()
+
+    def test_check_overlay_blocking_no_overlay(self) -> None:
+        """Verify no overlay is reported when element is unobstructed."""
+        from unittest.mock import MagicMock
+        from guardian_agent.browser_operator import _check_overlay_blocking
+
+        mock_page = MagicMock()
+        mock_page.evaluate.return_value = []
+
+        result = _check_overlay_blocking(mock_page, "#visible-button")
+        self.assertEqual(result, [])
+
+    def test_check_overlay_blocking_element_missing(self) -> None:
+        """Verify a missing element is reported as such, not as an overlay."""
+        from unittest.mock import MagicMock
+        from guardian_agent.browser_operator import _check_overlay_blocking
+
+        mock_page = MagicMock()
+        mock_page.evaluate.return_value = [
+            {"type": "missing", "description": "Element not found in DOM"}
+        ]
+
+        result = _check_overlay_blocking(mock_page, "#nonexistent")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["type"], "missing")
+
+    def test_check_overlay_blocking_js_exception_returns_empty(self) -> None:
+        """Verify a JavaScript exception returns an empty list (graceful degradation)."""
+        from unittest.mock import MagicMock
+        from guardian_agent.browser_operator import _check_overlay_blocking
+
+        mock_page = MagicMock()
+        mock_page.evaluate.side_effect = Exception("JS error")
+
+        result = _check_overlay_blocking(mock_page, "#some-element")
+        self.assertEqual(result, [])
+
+    # -------------------------------------------------------------------
+    # _wait_for_page_settled tests
+    # -------------------------------------------------------------------
+
+    def test_wait_for_page_settled_success(self) -> None:
+        """Verify page settlement detects a stable DOM."""
+        from unittest.mock import MagicMock
+        from guardian_agent.browser_operator import _wait_for_page_settled
+
+        mock_page = MagicMock()
+        # Simulate DOM stability check returning True
+        mock_page.evaluate.return_value = True
+
+        result = _wait_for_page_settled(mock_page, timeout=5_000)
+        self.assertTrue(result["settled"])
+        self.assertIn("network_idle_and_dom_stable", result["method"])
+        self.assertIn("elapsed_ms", result)
+
+    def test_wait_for_page_settled_unstable(self) -> None:
+        """Verify an unsettled page returns settled=False."""
+        from unittest.mock import MagicMock
+        from guardian_agent.browser_operator import _wait_for_page_settled
+
+        mock_page = MagicMock()
+        # Simulate DOM never stabilizing
+        mock_page.evaluate.return_value = False
+
+        result = _wait_for_page_settled(mock_page, timeout=1_000)
+        self.assertFalse(result["settled"])
+
+    def test_wait_for_page_settled_exception_returns_graceful(self) -> None:
+        """Verify an exception during settlement returns settled=False with error info."""
+        from unittest.mock import MagicMock
+        from guardian_agent.browser_operator import _wait_for_page_settled
+
+        mock_page = MagicMock()
+        mock_page.wait_for_load_state.side_effect = Exception("Navigation timeout")
+
+        result = _wait_for_page_settled(mock_page, timeout=5_000)
+        self.assertFalse(result["settled"])
+        self.assertEqual(result["method"], "timeout_or_error")
+        self.assertIn("Navigation timeout", result["error"])
+
+    # -------------------------------------------------------------------
+    # _check_element_stable tests
+    # -------------------------------------------------------------------
+
+    def test_check_element_stable_found_and_visible(self) -> None:
+        """Verify a visible, enabled element is reported as stable."""
+        from unittest.mock import MagicMock, PropertyMock
+        from guardian_agent.browser_operator import _check_element_stable
+
+        mock_page = MagicMock()
+        mock_locator = MagicMock()
+        # locator.count() returns 1 (element found)
+        mock_locator.count.return_value = 1
+        mock_locator.first = mock_locator
+        mock_locator.is_disabled.return_value = False
+        mock_page.locator.return_value = mock_locator
+
+        result = _check_element_stable(mock_page, "#visible-btn")
+        self.assertTrue(result["stable"])
+        self.assertIn("visible and enabled", result["reason"])
+
+    def test_check_element_stable_not_found(self) -> None:
+        """Verify a missing element is reported as stale."""
+        from unittest.mock import MagicMock
+        from guardian_agent.browser_operator import _check_element_stable
+
+        mock_page = MagicMock()
+        mock_locator = MagicMock()
+        mock_locator.count.return_value = 0
+        mock_page.locator.return_value = mock_locator
+
+        result = _check_element_stable(mock_page, "#missing-element")
+        self.assertFalse(result["stable"])
+        self.assertTrue(result["stale"])
+        self.assertIn("not found", result["reason"].lower())
+
+    def test_check_element_stable_disabled(self) -> None:
+        """Verify a disabled element is reported as unstable but not stale."""
+        from unittest.mock import MagicMock, PropertyMock
+        from guardian_agent.browser_operator import _check_element_stable
+
+        mock_page = MagicMock()
+        mock_locator = MagicMock()
+        mock_locator.count.return_value = 1
+        mock_locator.first = mock_locator
+        mock_locator.is_disabled.return_value = True
+        mock_page.locator.return_value = mock_locator
+
+        result = _check_element_stable(mock_page, "#disabled-input")
+        self.assertFalse(result["stable"])
+        self.assertFalse(result["stale"])
+        self.assertIn("disabled", result["reason"].lower())
+
+    def test_check_element_stable_exception_returns_stale(self) -> None:
+        """Verify an exception during stability check is reported as stale."""
+        from unittest.mock import MagicMock
+        from guardian_agent.browser_operator import _check_element_stable
+
+        mock_page = MagicMock()
+        mock_locator = MagicMock()
+        mock_locator.count.side_effect = Exception("DOM error")
+        mock_page.locator.return_value = mock_locator
+
+        result = _check_element_stable(mock_page, "#broken")
+        self.assertFalse(result["stable"])
+        self.assertTrue(result["stale"])
+
+    # -------------------------------------------------------------------
+    # _create_submission_fingerprint tests
+    # -------------------------------------------------------------------
+
+    def test_create_submission_fingerprint_captures_success(self) -> None:
+        """Verify a submission fingerprint captures success indicators."""
+        from unittest.mock import MagicMock, PropertyMock
+        from guardian_agent.browser_operator import _create_submission_fingerprint
+
+        mock_page = MagicMock()
+        type(mock_page).url = PropertyMock(return_value="https://example.com/success")
+        mock_page.title.return_value = "Payment Successful"
+        # Page body contains success keywords
+        body_text = "Your payment has been submitted successfully. Thank you for your order!"
+        mock_page.evaluate.return_value = body_text
+
+        result = _create_submission_fingerprint(mock_page, "submit")
+
+        self.assertEqual(result["action_type"], "submit")
+        self.assertEqual(result["current_url"], "https://example.com/success")
+        self.assertEqual(result["page_title"], "Payment Successful")
+        self.assertTrue(result["has_success_indicator"])
+        self.assertFalse(result["has_error_indicator"])
+        self.assertIn("success", result["success_keywords"])
+        self.assertIn("submitted", result["success_keywords"])
+        self.assertEqual(result["version"], 1)
+
+    def test_create_submission_fingerprint_captures_error(self) -> None:
+        """Verify a submission fingerprint captures error indicators."""
+        from unittest.mock import MagicMock, PropertyMock
+        from guardian_agent.browser_operator import _create_submission_fingerprint
+
+        mock_page = MagicMock()
+        type(mock_page).url = PropertyMock(return_value="https://example.com/error")
+        mock_page.title.return_value = "Error Page"
+        body_text = "Something went wrong. The transaction was declined. Please try again."
+        mock_page.evaluate.return_value = body_text
+
+        result = _create_submission_fingerprint(mock_page, "publish")
+
+        self.assertTrue(result["has_error_indicator"])
+        self.assertFalse(result["has_success_indicator"])
+        self.assertIn("declined", result["error_keywords"])
+        self.assertIn("declined", result["error_keywords"])
+        self.assertIn("try again", result["error_keywords"])
+
+    def test_create_submission_fingerprint_handles_js_failure(self) -> None:
+        """Verify fingerprint handles JS evaluation failure gracefully."""
+        from unittest.mock import MagicMock, PropertyMock
+        from guardian_agent.browser_operator import _create_submission_fingerprint
+
+        mock_page = MagicMock()
+        type(mock_page).url = PropertyMock(return_value="https://example.com/page")
+        mock_page.title.return_value = "Test"
+        mock_page.evaluate.side_effect = Exception("JS context destroyed")
+
+        result = _create_submission_fingerprint(mock_page, "click_readonly")
+
+        # Should still have basic fields even if JS fails
+        self.assertEqual(result["action_type"], "click_readonly")
+        self.assertEqual(result["current_url"], "https://example.com/page")
+        self.assertFalse(result["has_success_indicator"])
+        self.assertFalse(result["has_error_indicator"])
+        self.assertEqual(result["visible_text_snippet"], "")
+
+    # -------------------------------------------------------------------
+    # _reconcile_submission_state tests (pure dict logic, no mocks needed)
+    # -------------------------------------------------------------------
+
+    def test_reconcile_submission_url_change_and_success(self) -> None:
+        """URL change + success keywords → likely_success with high confidence."""
+        from guardian_agent.browser_operator import _reconcile_submission_state
+
+        before = {
+            "current_url": "https://example.com/checkout",
+            "has_success_indicator": False,
+            "has_error_indicator": False,
+            "success_keywords": [],
+            "error_keywords": [],
+        }
+        after = {
+            "current_url": "https://example.com/order-confirmation",
+            "has_success_indicator": True,
+            "has_error_indicator": False,
+            "success_keywords": ["success", "confirmed", "complete"],
+            "error_keywords": [],
+        }
+
+        result = _reconcile_submission_state(self.brain, before, after)
+        self.assertEqual(result["outcome"], "likely_success")
+        self.assertEqual(result["confidence"], 0.9)
+        self.assertTrue(result["url_changed"])
+        self.assertTrue(result["has_success"])
+        self.assertFalse(result["has_error"])
+
+    def test_reconcile_submission_url_change_no_error(self) -> None:
+        """URL change without error keywords → likely_success at 0.7 confidence."""
+        from guardian_agent.browser_operator import _reconcile_submission_state
+
+        before = {"current_url": "https://example.com/form", "has_success_indicator": False, "has_error_indicator": False}
+        after = {"current_url": "https://example.com/thanks", "has_success_indicator": False, "has_error_indicator": False}
+
+        result = _reconcile_submission_state(self.brain, before, after)
+        self.assertEqual(result["outcome"], "likely_success")
+        self.assertEqual(result["confidence"], 0.7)
+        self.assertTrue(result["url_changed"])
+
+    def test_reconcile_submission_success_keywords_only(self) -> None:
+        """Success keywords without URL change → likely_success at 0.6 confidence."""
+        from guardian_agent.browser_operator import _reconcile_submission_state
+
+        before = {"current_url": "https://example.com/page", "has_success_indicator": False, "has_error_indicator": False}
+        after = {"current_url": "https://example.com/page", "has_success_indicator": True, "has_error_indicator": False, "success_keywords": ["success"], "error_keywords": []}
+
+        result = _reconcile_submission_state(self.brain, before, after)
+        self.assertEqual(result["outcome"], "likely_success")
+        self.assertEqual(result["confidence"], 0.6)
+        self.assertFalse(result["url_changed"])
+
+    def test_reconcile_submission_error_detected(self) -> None:
+        """Error keywords → likely_failed at 0.8 confidence."""
+        from guardian_agent.browser_operator import _reconcile_submission_state
+
+        before = {"current_url": "https://example.com/pay", "has_success_indicator": False, "has_error_indicator": False}
+        after = {"current_url": "https://example.com/pay", "has_success_indicator": False, "has_error_indicator": True, "success_keywords": [], "error_keywords": ["declined", "error"]}
+
+        result = _reconcile_submission_state(self.brain, before, after)
+        self.assertEqual(result["outcome"], "likely_failed")
+        self.assertEqual(result["confidence"], 0.8)
+        self.assertTrue(result["has_error"])
+
+    def test_reconcile_submission_uncertain(self) -> None:
+        """No signals → uncertain at 0.3 confidence."""
+        from guardian_agent.browser_operator import _reconcile_submission_state
+
+        before = {"current_url": "https://example.com/page", "has_success_indicator": False, "has_error_indicator": False}
+        after = {"current_url": "https://example.com/page", "has_success_indicator": False, "has_error_indicator": False}
+
+        result = _reconcile_submission_state(self.brain, before, after)
+        self.assertEqual(result["outcome"], "uncertain")
+        self.assertEqual(result["confidence"], 0.3)
+
+    def test_reconcile_submission_missing_fields_defaults(self) -> None:
+        """Verify reconciliation handles missing fields gracefully."""
+        from guardian_agent.browser_operator import _reconcile_submission_state
+
+        before = {}
+        after = {}
+
+        result = _reconcile_submission_state(self.brain, before, after)
+        self.assertEqual(result["outcome"], "uncertain")
+        self.assertEqual(result["confidence"], 0.3)
+
+    # -------------------------------------------------------------------
+    # pause_for_takeover page-context tests
+    # -------------------------------------------------------------------
+
+    def test_pause_for_takeover_stores_page_context_in_meta(self) -> None:
+        """Verify pause_for_takeover stores current_page_url and current_page_title in metadata."""
+        from guardian_agent.browser_operator import pause_for_takeover, _takeover_meta_path
+
+        register_account(
+            self.brain,
+            account_id="acc-tk-pagectx",
+            service_name="canva",
+            account_label="Takeover Page Context Test",
+            vault_ref="vault:canva_key",
+            allowed_domains=["canva.com"],
+        )
+
+        # Use a unique signal file path
+        sig_file = Path(self.tempdir.name) / "takeover_signal_pagectx.txt"
+        sig_file.write_text("initial", encoding="utf-8")
+
+        result = pause_for_takeover(
+            self.brain,
+            account_id="acc-tk-pagectx",
+            timeout_seconds=1,  # Short timeout so test completes quickly
+            signal_file=sig_file,
+            current_page_url="https://canva.com/design/test-design-123",
+            current_page_title="My Canva Design",
+        )
+
+        # Should have timed out since we don't remove the signal
+        self.assertIn(result["status"], ("cancelled_timeout", "resumed"))
+
+        # Verify metadata contains page context
+        meta_p = _takeover_meta_path(self.brain, "acc-tk-pagectx")
+        self.assertTrue(meta_p.is_file())
+        meta = json.loads(meta_p.read_text(encoding="utf-8"))
+        self.assertEqual(meta.get("page_url"), "https://canva.com/design/test-design-123")
+        self.assertEqual(meta.get("page_title"), "My Canva Design")
+
+    def test_pause_for_takeover_without_page_context(self) -> None:
+        """Verify pause_for_takeover works without page context (backward compatible)."""
+        from guardian_agent.browser_operator import pause_for_takeover, _takeover_meta_path
+
+        register_account(
+            self.brain,
+            account_id="acc-tk-noctx",
+            service_name="canva",
+            account_label="Takeover No Context Test",
+            vault_ref="vault:canva_key",
+            allowed_domains=["canva.com"],
+        )
+
+        sig_file = Path(self.tempdir.name) / "takeover_signal_noctx.txt"
+        sig_file.write_text("initial", encoding="utf-8")
+
+        result = pause_for_takeover(
+            self.brain,
+            account_id="acc-tk-noctx",
+            timeout_seconds=1,
+            signal_file=sig_file,
+            # No current_page_url or current_page_title
+        )
+
+        self.assertIn(result["status"], ("cancelled_timeout", "resumed"))
+
+        # Verify metadata shows null for page context
+        meta_p = _takeover_meta_path(self.brain, "acc-tk-noctx")
+        self.assertTrue(meta_p.is_file())
+        meta = json.loads(meta_p.read_text(encoding="utf-8"))
+        self.assertIsNone(meta.get("page_url"))
+        self.assertIsNone(meta.get("page_title"))
+
+
 if __name__ == "__main__":
     unittest.main()
