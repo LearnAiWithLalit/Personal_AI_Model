@@ -127,8 +127,19 @@ from guardian_agent.external_skills import (
 from guardian_agent.aider import (
     aider_status,
     build_aider_command,
+    classify_task_size,
+    collect_aider_execution_evidence,
     create_aider_handoff,
     launch_aider,
+)
+from guardian_agent.jcode import (
+    build_jcode_command,
+    create_jcode_handoff,
+    execute_jcode_in_sandbox,
+    jcode_is_opted_in,
+    jcode_opt_in,
+    jcode_parallel_run,
+    jcode_status,
 )
 
 from guardian_agent.orchestration import (
@@ -525,14 +536,53 @@ def build_parser() -> argparse.ArgumentParser:
     freebuff_start.add_argument("--project", default=".", type=_project_path)
     freebuff_start.add_argument("--continue", dest="conversation_id", help="Continue a Freebuff conversation ID")
 
-    aider_p = subparsers.add_parser("aider", help="Prepare or launch a bounded Aider worker")
+    jcode_p = subparsers.add_parser("jcode", help="Detect, prepare, or preview a bounded JCode worker session")
+    jcode_sub = jcode_p.add_subparsers(dest="jcode_command", required=True)
+    jcode_status_p = jcode_sub.add_parser("status", help="Detect JCode binary and read version with timeout")
+    jcode_status_p.add_argument("--project", default=".", type=_project_path)
+    jcode_prepare = jcode_sub.add_parser("prepare", help="Build a compact dry-run JCode handoff and command preview")
+    jcode_prepare.add_argument("--project", default=".", type=_project_path)
+    jcode_prepare.add_argument("--task", required=True)
+    jcode_prepare.add_argument("--writable-path", action="append", default=[], help="Exact writable file/directory path (repeatable)")
+    jcode_prepare.add_argument("--test-command", help="Test command for verification")
+    jcode_command = jcode_sub.add_parser("command", help="Preview the safe JCode command without executing it")
+    jcode_command.add_argument("--project", default=".", type=_project_path)
+    jcode_command.add_argument("--task", required=True)
+    jcode_command.add_argument("--writable-path", action="append", default=[])
+    jcode_command.add_argument("--test-command")
+    jcode_command.add_argument("--allow-edits", action="store_true", help="Remove --dry-run from the command")
+    jcode_optin = jcode_sub.add_parser("opt-in", help="Explicitly opt in to JCode execution for this project")
+    jcode_optin.add_argument("--project", default=".", type=_project_path)
+    jcode_run = jcode_sub.add_parser("run", help="Execute JCode in a sandbox worktree with controlled execution")
+    jcode_run.add_argument("--project", default=".", type=_project_path)
+    jcode_run.add_argument("--task", required=True)
+    jcode_run.add_argument("--writable-path", action="append", default=[])
+    jcode_run.add_argument("--test-command")
+    jcode_run.add_argument("--timeout", type=int, default=300, help="Max seconds for JCode execution (10-3600)")
+    jcode_parallel = jcode_sub.add_parser("parallel-run", help="Execute multiple bounded JCode tasks in parallel with conflict detection")
+    jcode_parallel.add_argument("--project", default=".", type=_project_path)
+    jcode_parallel.add_argument("--task", action="append", required=True, dest="tasks", help="Task description (repeatable, max 2)")
+    jcode_parallel.add_argument("--writable-path", action="append", default=[], help="Writable path for ALL tasks (repeatable)")
+    jcode_parallel.add_argument("--test-command", help="Test command for ALL tasks")
+    jcode_parallel.add_argument("--timeout", type=int, default=300, help="Per-worker timeout seconds (10-3600)")
+    jcode_parallel.add_argument("--global-timeout", type=int, default=600, help="Total timeout for all workers combined")
+
+    aider_p = subparsers.add_parser("aider", help="Prepare or launch a bounded Aider worker with routing and evidence")
     aider_sub = aider_p.add_subparsers(dest="aider_command", required=True)
     aider_status_p = aider_sub.add_parser("status", help="Inspect Aider and local backend availability")
     aider_status_p.add_argument("--project", default=".", type=_project_path)
+    aider_classify = aider_sub.add_parser("classify", help="Classify task by size for routing decisions")
+    aider_classify.add_argument("--project", default=".", type=_project_path)
+    aider_classify.add_argument("--task", required=True)
     aider_prepare = aider_sub.add_parser("prepare", help="Create a profile-routed Aider handoff")
     aider_prepare.add_argument("--project", default=".", type=_project_path)
     aider_prepare.add_argument("--task", required=True)
     aider_prepare.add_argument("--limit", type=int, default=5)
+    aider_prepare.add_argument("--acceptance-criteria", action="append", default=[], help="Acceptance criteria (repeatable)")
+    aider_prepare.add_argument("--writable-path", action="append", default=[], help="Exact writable file path (repeatable)")
+    aider_prepare.add_argument("--test-command", help="Test command for verification")
+    aider_prepare.add_argument("--risk", action="append", default=[], help="Known risk (repeatable)")
+    aider_prepare.add_argument("--stop-condition", action="append", default=[], help="Stop condition (repeatable)")
     aider_command = aider_sub.add_parser("command", help="Preview the bounded Aider command")
     aider_command.add_argument("--project", default=".", type=_project_path)
     aider_command.add_argument("--task", required=True)
@@ -540,6 +590,11 @@ def build_parser() -> argparse.ArgumentParser:
     aider_command.add_argument("--model", required=True)
     aider_command.add_argument("--limit", type=int, default=5)
     aider_command.add_argument("--allow-edits", action="store_true")
+    aider_command.add_argument("--acceptance-criteria", action="append", default=[])
+    aider_command.add_argument("--writable-path", action="append", default=[])
+    aider_command.add_argument("--test-command")
+    aider_command.add_argument("--risk", action="append", default=[])
+    aider_command.add_argument("--stop-condition", action="append", default=[])
     aider_start = aider_sub.add_parser("start", help="Launch Aider; dry-run is the default")
     aider_start.add_argument("--project", default=".", type=_project_path)
     aider_start.add_argument("--task", required=True)
@@ -547,6 +602,15 @@ def build_parser() -> argparse.ArgumentParser:
     aider_start.add_argument("--model", required=True)
     aider_start.add_argument("--limit", type=int, default=5)
     aider_start.add_argument("--allow-edits", action="store_true")
+    aider_start.add_argument("--acceptance-criteria", action="append", default=[])
+    aider_start.add_argument("--writable-path", action="append", default=[])
+    aider_start.add_argument("--test-command")
+    aider_start.add_argument("--risk", action="append", default=[])
+    aider_start.add_argument("--stop-condition", action="append", default=[])
+    aider_evidence = aider_sub.add_parser("evidence", help="Collect execution evidence after Aider completes")
+    aider_evidence.add_argument("--project", default=".", type=_project_path)
+    aider_evidence.add_argument("--task", required=True)
+    aider_evidence.add_argument("--test-command", help="Test command to run for verification")
 
     mcp_p = subparsers.add_parser("mcp", help="Manage allowlisted MCP stdio servers and tools")
     mcp_sub = mcp_p.add_subparsers(dest="mcp_command", required=True)
@@ -695,10 +759,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     executor_ready_p.add_argument("--project", default=".", type=_project_path)
     executor_run_p = executor_sub.add_parser(
-        "run", help="Process ready tickets up to limit"
+        "run", help="Process ready tickets up to limit with concurrent workers"
     )
     executor_run_p.add_argument("--project", default=".", type=_project_path)
     executor_run_p.add_argument("--max-tickets", type=int, default=10)
+    executor_run_p.add_argument("--max-workers", type=int, default=4, help="Max concurrent workers (1-16)")
     executor_run_p.add_argument("--dry-run", action="store_true")
 
     # Local Service & Brain Backup CLI
@@ -1407,12 +1472,77 @@ def main(argv: list[str] | None = None) -> int:
                 return launch_freebuff(brain, args.conversation_id)
             return 0
 
+        if args.command == "jcode":
+            if args.jcode_command == "status":
+                print(json.dumps(jcode_status(), indent=2))
+                return 0
+            if args.jcode_command == "prepare":
+                result = create_jcode_handoff(
+                    brain, args.task,
+                    writable_paths=args.writable_path or None,
+                    test_command=args.test_command,
+                )
+                print(json.dumps(result, indent=2))
+                return 0
+            if args.jcode_command == "command":
+                result = build_jcode_command(
+                    brain, args.task,
+                    writable_paths=args.writable_path or None,
+                    test_command=args.test_command,
+                    allow_edits=args.allow_edits,
+                )
+                print(json.dumps(result, indent=2))
+                return 0
+            if args.jcode_command == "opt-in":
+                result = jcode_opt_in(brain)
+                print(json.dumps(result, indent=2))
+                return 0
+            if args.jcode_command == "run":
+                result = execute_jcode_in_sandbox(
+                    brain, args.task,
+                    writable_paths=args.writable_path or None,
+                    test_command=args.test_command,
+                    timeout=args.timeout,
+                )
+                print(json.dumps(result, indent=2))
+                return 0
+            if args.jcode_command == "parallel-run":
+                if len(args.tasks) < 1 or len(args.tasks) > 2:
+                    print(json.dumps({"error": "Provide 1-2 tasks for parallel execution."}, indent=2))
+                    return 1
+                task_packages = []
+                for t in args.tasks:
+                    task_packages.append({
+                        "task": t,
+                        "writable_paths": args.writable_path or [],
+                        "test_command": args.test_command,
+                        "timeout": args.timeout,
+                    })
+                result = jcode_parallel_run(
+                    brain, task_packages,
+                    global_timeout=args.global_timeout,
+                )
+                print(json.dumps(result, indent=2, default=str))
+                return 0
+            return 0
+
         if args.command == "aider":
             if args.aider_command == "status":
                 print(json.dumps(aider_status(), indent=2))
                 return 0
+            if args.aider_command == "classify":
+                result = classify_task_size(args.task)
+                print(json.dumps(result, indent=2))
+                return 0
             if args.aider_command == "prepare":
-                result = create_aider_handoff(brain, args.task, args.limit)
+                result = create_aider_handoff(
+                    brain, args.task, args.limit,
+                    acceptance_criteria=args.acceptance_criteria or None,
+                    writable_paths=args.writable_path or None,
+                    test_command=args.test_command,
+                    risks=args.risk or None,
+                    stop_conditions=args.stop_condition or None,
+                )
                 print(json.dumps(result, indent=2))
                 return 0
             if args.aider_command == "command":
@@ -1423,17 +1553,35 @@ def main(argv: list[str] | None = None) -> int:
                     args.model,
                     dry_run=not args.allow_edits,
                     limit=args.limit,
+                    acceptance_criteria=args.acceptance_criteria or None,
+                    writable_paths=args.writable_path or None,
+                    test_command=args.test_command,
+                    risks=args.risk or None,
+                    stop_conditions=args.stop_condition or None,
                 )
                 print(json.dumps(result, indent=2))
                 return 0
-            return launch_aider(
+            if args.aider_command == "evidence":
+                result = collect_aider_execution_evidence(
+                    brain, args.task, test_command=args.test_command,
+                )
+                print(json.dumps(result, indent=2))
+                return 0
+            # 'start' subcommand
+            print(json.dumps(launch_aider(
                 brain,
                 args.task,
                 args.backend,
                 args.model,
                 dry_run=not args.allow_edits,
                 limit=args.limit,
-            )
+                acceptance_criteria=args.acceptance_criteria or None,
+                writable_paths=args.writable_path or None,
+                test_command=args.test_command,
+                risks=args.risk or None,
+                stop_conditions=args.stop_condition or None,
+            ), indent=2))
+            return 0
 
         if args.command == "mcp":
             if args.mcp_command == "add":
@@ -1479,6 +1627,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = process_ready_tickets(
                     brain,
                     max_tickets=args.max_tickets,
+                    max_workers=args.max_workers,
                     dry_run=args.dry_run,
                 )
             else:

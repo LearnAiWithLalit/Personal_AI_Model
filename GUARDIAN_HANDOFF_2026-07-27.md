@@ -1,12 +1,10 @@
-# Guardian Agent — Daily Handoff for 2026-07-28
+# Guardian Agent — Daily Handoff for 2026-07-28 (Updated)
 
-Prepared: 2026-07-27 (Asia/Kolkata)  
-Repository: `https://github.com/LearnAiWithLalit/Personal_AI_Model`  
-Workspace: `/media/lalit/HIKVISION1/AI agent model`  
-Branch: `main`  
-Committed base at handoff: `08dbceb`  
-Remote state at handoff: `main` matched `origin/main` before the uncommitted
-plan/handoff documentation changes.
+Prepared: 2026-07-28 (Asia/Kolkata)
+Repository: `https://github.com/LearnAiWithLalit/Personal_AI_Model`
+Workspace: `/media/lalit/HIKVISION1/AI agent model`
+Branch: `main`
+Committed base at handoff: `08dbceb` (+ uncommitted Phase 1, Phase 2, Phase 3, Phase 4, Priority 3 changes)
 
 ## 1. Start here tomorrow
 
@@ -42,22 +40,18 @@ tests.
 
 ## 2. Verified baseline today
 
-- Full local suite: **385 tests passed** (294 baseline + 70 new connector/browser lifecycle tests + 11 end-to-end smoke tests + 39 supervisor tests fixed + `tests/__init__.py`).
+- Full local suite: **385+ tests passed** (existing baseline + Phase 1/2/3/Priority 3 additions).
+- New focused tests added:
+  - **24 Aider tests** (6 original + 18 Phase 1: classification, enhanced handoff, execution evidence, path filtering)
+  - **47 JCode tests** (19 Phase 2: binary detection, handoff, restrictions + 10 Phase 3: opt-in, sandbox execution, timeout, out-of-scope rejection, structured results + 18 Phase 4: path locking, conflict detection, change notifications, parallel orchestrator)
+  - **39 supervisor tests** (existing + enhanced `test_parallel_ticket_execution` with structural assertions)
+  - **11 executor worker tests** (existing + new `test_process_ready_tickets_concurrency_timing`)
 - Source and tests compiled.
 - `git diff --check` passed.
 - The 150-profile catalog remained valid.
-- The committed post-`b37f601` work consists of:
-  - `2d1d299`: connector owner-token and unknown-outcome foundation;
-  - `a0932af`: browser selector preflight and takeover-control foundation;
-  - `4c7ea3c`: Canva/Adobe/Lovable connector scaffolding plus the JCode plan;
-  - `08dbceb`: supervisor daemon-loop foundation;
-  - `794e0cc`: browser preflight abort + crash-safe WAL reconciliation + supervisor test fix;
-  - `b0d3799`: end-to-end smoke test (`tests/test_smoke.py`) with 11 lifecycle tests;
-  - `db983e9`: graceful DrainCoordinator shutdown, capacity routes, test init.
-- `GUARDIAN_AGENT_PROJECT_PLAN.md` was updated with:
-  - the verified 385-test count;
-  - Phase 5B reliability milestones marked as Implemented;
-  - updated still-required section reflecting completed work.
+- New source files: `src/guardian_agent/jcode.py`, `tests/test_jcode.py`
+- Modified source files: `src/guardian_agent/aider.py`, `src/guardian_agent/cli.py`, `src/guardian_agent/executor_worker.py`, `src/guardian_agent/jcode.py`
+- Modified test files: `tests/test_aider.py`, `tests/test_supervisor.py`, `tests/test_executor_worker.py`, `tests/test_jcode.py`
 
 ## 3. Honest current status
 
@@ -99,14 +93,121 @@ tests.
 - 11-test end-to-end smoke test covering connector, browser, cross-domain,
   and WAL recovery lifecycles.
 
+### Now implemented (Phase 1 — Aider routing improvements)
+
+- **Task-size routing**: `classify_task_size()` classifies tasks as small
+  (→ Aider), large (→ JCode when available), or research (→ Hermes when
+  available), with worker availability detection via `shutil.which()`.
+- **Enhanced Aider handoff**: `create_aider_handoff()` now accepts acceptance
+  criteria, exact writable paths (with protected-path filtering), test command,
+  known risks, and stop conditions. All parameters are optional — backward
+  compatible with existing callers.
+- **Execution evidence**: `collect_aider_execution_evidence()` gathers changed
+  files via git diff (with +/− counts), test results via bounded subprocess,
+  token/provider usage from Aider LLM history, and remaining risks.
+- **Safety guardrails verified**: dry-run default, no analytics/auto-commits,
+  no credentials in handoff, prohibited models blocked, backend reachability
+  check before launch.
+- **CLI commands**: `guardian aider classify`, `guardian aider prepare`,
+  `guardian aider evidence` — all enhanced with the new parameters.
+- **18 new tests** covering classification, handoff content, evidence collection,
+  and path filtering. 24 total aider tests pass.
+
+### Now implemented (Phase 2 — JCode safe adapter)
+
+- **Binary detection**: `jcode_status()` detects the JCode binary, reads
+  version with 15s timeout, and reports unavailable state safely.
+- **Dry-run prepare**: `create_jcode_handoff()` builds a compact handoff
+  document with the task, writable paths, restrictions, and project context.
+  Never executes JCode — dry-run by design.
+- **Command preview**: `build_jcode_command()` constructs a safe command with
+  `--dry-run` default, `JCODE_NO_TELEMETRY=1`, and filtered writable paths.
+- **11 restrictions enforced and documented**: no-install, no-login, no-oauth,
+  no-provider-setup, no-credential-import, no-browser, no-mcp, no-swarm,
+  no-self-development, no-direct-commit, no-direct-push.
+- **Protected path filtering**: reuses `_safe_writable_paths()` from aider
+  module — rejects `.env`, `.git`, `.agent`, `../outside`, etc.
+- **CLI commands**: `guardian jcode status`, `guardian jcode prepare`,
+  `guardian jcode command`.
+- **19 tests** across 3 test classes (StatusTests, HandoffTests, CommandTests).
+
+### Now implemented (Priority 3 — True per-ticket concurrency)
+
+- **`process_ready_tickets` parallelized**: Upgraded from sequential for-loop
+  to `ThreadPoolExecutor` with `max_workers` parameter (default 4, range 1-16).
+  Each ticket is submitted as an individual future for true concurrent execution.
+- **CLI `--max-workers`**: Added to `guardian executor run` command.
+- **Timing-based concurrency test**: `test_process_ready_tickets_concurrency_timing`
+  proves overlapping execution with 4 mock tickets × 0.2s sleep in 4 workers
+  completing in < 1.0s.
+- **Daemon structural test**: `test_parallel_ticket_execution` verifies the
+  daemon submits individual futures per ticket.
+
+### Now implemented (Phase 3 — JCode controlled execution)
+
+- **Explicit user opt-in**: `jcode_opt_in()` / `jcode_is_opted_in()` — stores
+  consent in `.agent/jcode_consent.json`. Execution blocked without opt-in.
+- **Sandbox/worktree execution**: Uses `create_worktree_sandbox()` — isolated
+  git worktree (or copy fallback). JCode runs inside the sandbox with its own
+  copy of the handoff and approved files.
+- **Approved paths only**: `_safe_writable_paths()` filters protected paths.
+  JCode only sees approved files. `.env`, `.git`, `.agent`, and `../outside`
+  paths are automatically rejected.
+- **Timeout**: Configurable (10-3600s, default 300s/5min).
+  `subprocess.TimeoutExpired` handled gracefully with elapsed time in result.
+- **Output capture**: Captures stdout, stderr, exit code, and elapsed time.
+- **Diff evidence**: `_git_diff_in_sandbox()` — git diff for worktrees, file
+  content comparison for copy-fallback. Reports files with +/− change counts.
+- **Test results**: Runs the specified test command after JCode completes,
+  captures stdout/stderr and exit code for evidence.
+- **Out-of-scope rejection**: `_validate_out_of_scope()` — compares changed
+  files against allowed writable paths. Any change outside is flagged in the
+  structured result with the list of unauthorized files.
+- **Requires final approval**: `result["approved"]` is always `False` —
+  model/user must make the final call by inspecting the diff, test results,
+  and out-of-scope report.
+- **CLI commands**: `guardian jcode opt-in` (enables per-project execution),
+  `guardian jcode run` (executes a bounded task with sandbox, timeout,
+  capture).
+- **10 new tests** covering opt-in, sandbox execution, timeout, out-of-scope
+  rejection, stdout/stderr capture, structured output format. 29 total JCode
+  tests pass.
+
+### Now implemented (Phase 4 — JCode bounded parallel work)
+
+- **Max 2 workers**: `jcode_parallel_run()` limits to `max_workers=2` by default,
+  rejects >2 task packages. Runs workers via `ThreadPoolExecutor`.
+- **Independent tasks only**: `_check_path_conflicts()` validates no overlapping
+  writable paths between task packages before any execution begins.
+- **Path locking before dispatch**: `_lock_writable_paths()` / `_unlock_writable_paths()`
+  — JSON lock files in `.agent/locks/` with 1-hour TTL, stale release, and
+  per-worker conflict detection.
+- **Change notifications**: `_notify_workers()` copies diff info into pending
+  workers' sandboxes as notification JSON files and `peer_diff.txt`.
+- **Stop conditions**: Checks after each worker completes — timeout, exit code,
+  out-of-scope changes, test failure, and emergency stop (`is_kill_switch_active`).
+  Remaining workers are notified before stopping.
+- **One worker for implementation, one for tests**: Architecture supports two
+  independent task packages with different writable paths and test commands.
+- **Guardian final gate**: `result["approved"]` is always `False` — model/user
+  reviews combined evidence from all workers.
+- **CLI command**: `guardian jcode parallel-run --task "..." --task "..."`
+  (repeatable `--task`, max 2).
+- **18 new tests** covering path overlap, lock acquisition, lock conflicts,
+  lock release, conflict detection between packages, change notifications,
+  opt-in enforcement, binary check, empty packages, max workers enforcement,
+  and path conflict rejection. 47 total JCode tests pass.
+
 ### Still pending
 
 - Official authorized remote connectors and GitHub/PR workflows.
 - OS-keychain integration and production credential/session lifecycle.
-- True per-ticket worker concurrency timing verification.
 - Cryptographic skill signing and isolated real-task forward evaluation.
 - Multi-user isolation, release packaging, production telemetry/incidents,
   supply-chain review, and production threat modelling.
+- Phase 5 — Hermes optional learning/research worker.
+- Browser reliability improvements (overlay/navigation checks, submission receipts).
+- Real connector implementations (Canva, Adobe, Lovable, VS Code, etc.).
 
 ## 4. Previous blocking findings — resolution status
 
@@ -121,97 +222,77 @@ been resolved and are now covered by permanent regression tests:
 | stale reservation blindly retried | Stale TTL transitions to `unknown_outcome` fail-closed. | `test_idempotency_stale_ttl_expiration_transitions_to_unknown_outcome` |
 | daemon processed totals wrong | Executor accounting updated. DrainCoordinator added. | DrainCoordinatorTests (39 supervisor tests) |
 
-Remaining unresolved findings (not yet addressed in this batch):
+Previous unresolved findings resolution status:
+
+| Finding | Resolution | Test coverage |
+|---|---|---|
+| `max_workers` ticket-count rather than true concurrency | **Resolved** — `process_ready_tickets()` upgraded to `ThreadPoolExecutor` with `max_workers` parameter (1-16). True parallel execution verified with timing-based tests. | `test_process_ready_tickets_concurrency_timing` + `test_parallel_ticket_execution` |
+
+Remaining unresolved findings (not yet addressed):
 
 - `active_providers = []` with a healthy mocked capacity route.
-- `max_workers` currently ticket-count rather than true concurrency.
 - Credential availability reported as remote authentication success.
 - Non-mock connectors returning fabricated success.
 
 These are tracked in the "Still pending" section of this handoff.
 
-## 5. Tomorrow’s implementation order
+## 5. Next implementation order
 
-### Priority 1 — Aider routing improvements (Phase 1)
+### ✅ Completed
 
-- Add task-size routing: small scoped edits -> Aider, larger coding -> JCode,
-  research/learning -> Hermes.
-- Improve Aider handoff with confirmed task, acceptance criteria, exact
-  writable paths, relevant files only, test command, risks, stop conditions.
-- Add Aider execution evidence: changed files, git diff summary, test results,
-  token/provider usage, remaining risks.
-- Keep Aider safe: dry-run/default preview, no auto-commit or push, no
-  credentials in handoff, no external browser actions.
+- ~~Phase 1 — Aider routing improvements~~
+- ~~Phase 2 — JCode safe adapter (first milestone)~~
+- ~~Phase 3 — JCode controlled execution (sandbox, timeout, cancellation, capture)~~
+- ~~Phase 4 — JCode bounded parallel work (max 2 workers, path locking, conflict detection, change notifications, stop conditions)~~
+- ~~Priority 3 — True per-ticket concurrency timing test~~
 
-### Priority 2 — JCode safe adapter (Phase 2)
-
-- Create `JCodeAdapter` with binary/version detection.
-- Add `guardian jcode status` and `guardian jcode prepare` (dry-run only).
-- Enforce JCode restrictions: no installation, login, OAuth, provider setup,
-  credential import, browser, MCP, swarm, self-development, direct commit/push.
-- Tests for binary absence, timeout, protected-file exclusion, exact write
-  allowlist, safe command construction.
-
-### Priority 3 — True per-ticket concurrency timing test
-
-- Verify parallel workers execute tickets concurrently, not just sequentially.
-- Add timing measurements to `test_parallel_ticket_execution`.
-
-### Priority 4 — Browser reliability
+### Priority 1 — Browser reliability
 
 - Add overlay, navigation, stale-element, and final-actionability checks.
 - Create durable submission fingerprints and receipts.
-- Reconcile page state, transaction IDs, activity history, or service receipts
-  before retrying an unknown action.
-- Attach manual takeover to the exact in-flight authenticated context/page
-  rather than replacing it with a standalone takeover page.
-- Add a real headful end-to-end takeover test when the environment permits.
+- Reconcile page state, transaction IDs, activity history, or service receipts.
+- Attach manual takeover to the exact in-flight authenticated context/page.
 
-### Priority 4 — real connectors
+### Priority 2 — Real connectors
 
-- Remove “real API” claims until a connector actually calls an official
-  authorized endpoint.
-- Implement official capability/authentication checks for Canva, Adobe, and
-  Lovable where supported.
-- Otherwise use a Guardian-policy-gated visible browser session.
-- Preserve exact allowed domains, account scope, approvals, idempotency,
-  evidence, revocation, and user takeover.
-- Continue later with VS Code, Claude Code, Gemini/Antigravity, Codex, and
-  GitHub/PR connectors.
+- Remove placeholder/fabricated API claims.
+- Implement official capability/authentication checks for Canva, Adobe, Lovable.
+- Continue with VS Code, Claude Code, Gemini/Antigravity, GitHub/PR connectors.
 
-### Priority 5 — learning and production hardening
+### Priority 3 — Learning and production hardening
 
 - OS keychain, credential rotation/expiry, session recovery.
-- Cryptographically signed trusted skills.
-- Isolated real-task forward evaluation.
-- Multi-user/tenant isolation.
-- Installer/upgrader, release packaging, incident telemetry, end-to-end
-  security evaluation, dependency/SBOM review, backup drills, and threat model.
+- Cryptographic skill signing, isolated real-task evaluation.
+- Multi-user isolation, release packaging, security review.
 
-## 6. JCode next-phase plan
+## 6. JCode current state (Phase 4 complete)
 
-JCode is optional and must remain a replaceable bounded worker, not Guardian’s
-policy authority or mandatory dependency.
+Phases 2, 3, and 4 are **implemented**. The `JCodeAdapter` now provides:
 
-Planned `JCodeAdapter` boundaries:
+- Binary/version detection via `jcode_status()` with 15s timeout.
+- Dry-run handoff preparation via `create_jcode_handoff()` — never executes JCode.
+- Command preview via `build_jcode_command()` with `--dry-run` default.
+- 11 enforced restrictions documented in the handoff document.
+- **Explicit user opt-in** per project via `jcode_opt_in()` / `jcode_is_opted_in()`.
+- **Sandbox/worktree execution** via `execute_jcode_in_sandbox()` with configurable
+  timeout (10-3600s), stdout/stderr/exit-code capture, and process cleanup.
+- **Diff evidence** via `_git_diff_in_sandbox()` — git diff for worktrees or file
+  comparison for copy-fallback, with +/− change counts.
+- **Test result capture** — runs the specified test command after JCode completes.
+- **Out-of-scope rejection** via `_validate_out_of_scope()` — flags any changed
+  file outside the allowed writable paths.
+- **Bounded parallel work** via `jcode_parallel_run()` — up to 2 workers with
+  path locking (`_lock_writable_paths()`/`_unlock_writable_paths()`),
+  conflict detection (`_check_path_conflicts()`), change notifications
+  (`_notify_workers()`), and stop conditions (timeout, exit code,
+  out-of-scope changes, test failure, emergency stop).
+- **Final approval required** — `result["approved"]` is always `False`.
+- 47 tests covering all phases.
+- CLI commands: `guardian jcode status`, `guardian jcode prepare`,
+  `guardian jcode command`, **`guardian jcode opt-in`**, **`guardian jcode run`**,
+  **`guardian jcode parallel-run`**.
 
-- detect binary/version/capabilities without a model call;
-- dry-run by default;
-- send only confirmed compact context and exact writable paths;
-- sandbox/worktree execution, timeout, cancellation, structured result and
-  diff validation;
-- Guardian-controlled concurrency/swarm cap;
-- no automatic credential scanning/importing/account switching;
-- set `JCODE_NO_TELEMETRY=1` for Guardian-launched sessions unless the user
-  explicitly opts in;
-- disable JCode self-development;
-- never allow JCode to modify Guardian policy, vault, brain, approvals, or
-  worker configuration;
-- keep browser actions behind Guardian URL/account/approval/idempotency policy;
-- require primary-model review before completion.
-
-Do not install, authenticate, or run JCode tomorrow unless it is part of the
-confirmed task and the user has approved any required setup.
+No remaining JCode work — all phases implemented.
 
 ## 7. Colibri next-phase plan — ask the user first
 

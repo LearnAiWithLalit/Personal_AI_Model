@@ -327,30 +327,66 @@ def process_ready_tickets(
     brain: ProjectBrain,
     max_tickets: int = 10,
     dry_run: bool = False,
+    max_workers: int = 4,
 ) -> dict[str, Any]:
-    """Find and execute ready supervisor tickets up to max_tickets limit."""
+    """Find and execute ready supervisor tickets with true concurrent parallelism.
+
+    Uses a ThreadPoolExecutor to process tickets concurrently up to max_workers
+    limit. Previously this function processed tickets sequentially in a for loop,
+    meaning max_tickets was just a count limit rather than true parallelism.
+
+    Args:
+        brain: The project brain.
+        max_tickets: Maximum tickets to process in this call.
+        dry_run: If True, simulate execution without claiming leases.
+        max_workers: Maximum concurrent workers for ticket execution.
+
+    Returns:
+        Dict with execution results per ticket.
+    """
     if max_tickets < 1 or max_tickets > 100:
         raise GuardianError("max_tickets must be between 1 and 100.")
+    if max_workers < 1 or max_workers > 16:
+        raise GuardianError("max_workers must be between 1 and 16.")
 
     if is_kill_switch_active(brain):
         raise GuardianError("Emergency stop is active; process tickets blocked.")
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     tickets = list_ready_tickets(brain, limit=max_tickets)
     executed: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
 
-    for ticket in tickets:
-        if is_kill_switch_active(brain):
-            break
-        try:
-            result = execute_ticket(brain, ticket, dry_run=dry_run)
-            executed.append(result)
-        except (GuardianError, OSError, json.JSONDecodeError, ValueError) as err:
-            clean_err = redact_secrets(brain, str(err))
-            errors.append({
-                "ticket_id": ticket.get("stage_id"),
-                "error": clean_err,
-            })
+    if not tickets:
+        return {
+            "tickets_inspected": 0,
+            "executed_count": 0,
+            "error_count": 0,
+            "executed": [],
+            "processed": [],
+            "errors": [],
+        }
+
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="guardian-ticket") as pool:
+        futures = {}
+        for ticket in tickets:
+            if is_kill_switch_active(brain):
+                break
+            future = pool.submit(execute_ticket, brain, ticket, dry_run=dry_run)
+            futures[future] = ticket
+
+        for future in as_completed(futures):
+            ticket = futures[future]
+            try:
+                result = future.result()
+                executed.append(result)
+            except (GuardianError, OSError, json.JSONDecodeError, ValueError) as err:
+                clean_err = redact_secrets(brain, str(err))
+                errors.append({
+                    "ticket_id": ticket.get("stage_id"),
+                    "error": clean_err,
+                })
 
     return {
         "tickets_inspected": len(tickets),

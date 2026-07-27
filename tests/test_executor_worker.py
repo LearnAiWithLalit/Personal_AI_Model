@@ -175,6 +175,69 @@ class ExecutorWorkerTests(unittest.TestCase):
         res = process_ready_tickets(self.brain, max_tickets=2, dry_run=False)
         self.assertTrue(res["executed_count"] >= 1)
 
+    @patch("guardian_agent.executor_worker.list_ready_tickets")
+    @patch("guardian_agent.executor_worker.execute_ticket")
+    def test_process_ready_tickets_concurrency_timing(self, mock_execute, mock_list) -> None:
+        """Verify process_ready_tickets processes tickets concurrently using timing.
+
+        With max_workers=4 and 4 tickets each simulating 0.2s work, the total
+        time should be ~0.2s (parallel) rather than ~0.8s (sequential).
+        """
+        import time as _time
+
+        # Create 4 mock tickets
+        mock_tickets = []
+        for i in range(4):
+            mock_tickets.append({
+                "version": 1,
+                "execution_id": f"exec-concur-{i}",
+                "stage_id": "stage-1",
+                "executor": "deterministic",
+                "state": "ready",
+                "task": "Implement feature",
+                "purpose": f"Mock ticket {i}",
+            })
+        mock_list.return_value = mock_tickets
+
+        exec_times = []
+
+        def _timed_execute(brain, ticket, dry_run=False):
+            exec_times.append(_time.time())
+            _time.sleep(0.2)
+            return {
+                "execution_id": ticket.get("execution_id", "exec-unknown"),
+                "stage_id": ticket.get("stage_id", "stage-1"),
+                "executor": "deterministic",
+                "outcome": "dispatched",
+            }
+
+        mock_execute.side_effect = _timed_execute
+
+        start = _time.time()
+        res = process_ready_tickets(self.brain, max_tickets=4, dry_run=True, max_workers=4)
+        elapsed = _time.time() - start
+
+        # Should have processed all tickets
+        self.assertEqual(res["executed_count"], 4)
+
+        # Timing proof: 4 tickets × 0.2s should take < 1.0s with parallelism
+        # (generous threshold accounting for thread pool overhead)
+        self.assertLess(
+            elapsed,
+            1.0,
+            f"4 tickets × 0.2s sleep took {elapsed:.2f}s — likely sequential, not parallel",
+        )
+
+        # Verify execution timestamps overlap (proof of concurrency)
+        if len(exec_times) >= 2:
+            sorted_times = sorted(exec_times)
+            spread = sorted_times[-1] - sorted_times[0]
+            self.assertLess(
+                spread,
+                0.5,
+                f"Ticket start times span {spread:.2f}s — likely sequential",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
