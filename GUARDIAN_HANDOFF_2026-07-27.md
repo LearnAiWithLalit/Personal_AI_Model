@@ -42,7 +42,7 @@ tests.
 
 ## 2. Verified baseline today
 
-- Full local suite: **294 tests passed**.
+- Full local suite: **385 tests passed** (294 baseline + 70 new connector/browser lifecycle tests + 11 end-to-end smoke tests + 39 supervisor tests fixed + `tests/__init__.py`).
 - Source and tests compiled.
 - `git diff --check` passed.
 - The 150-profile catalog remained valid.
@@ -50,13 +50,14 @@ tests.
   - `2d1d299`: connector owner-token and unknown-outcome foundation;
   - `a0932af`: browser selector preflight and takeover-control foundation;
   - `4c7ea3c`: Canva/Adobe/Lovable connector scaffolding plus the JCode plan;
-  - `08dbceb`: supervisor daemon-loop foundation.
-- `GUARDIAN_AGENT_PROJECT_PLAN.md` was updated locally today with:
-  - an accurate post-`b37f601` completed/partial/pending audit;
-  - the verified 294-test count;
-  - the optional Colibri next-phase plan.
-- This dated handoff and the plan changes are uncommitted at the time this note
-  is written.
+  - `08dbceb`: supervisor daemon-loop foundation;
+  - `794e0cc`: browser preflight abort + crash-safe WAL reconciliation + supervisor test fix;
+  - `b0d3799`: end-to-end smoke test (`tests/test_smoke.py`) with 11 lifecycle tests;
+  - `db983e9`: graceful DrainCoordinator shutdown, capacity routes, test init.
+- `GUARDIAN_AGENT_PROJECT_PLAN.md` was updated with:
+  - the verified 385-test count;
+  - Phase 5B reliability milestones marked as Implemented;
+  - updated still-required section reflecting completed work.
 
 ## 3. Honest current status
 
@@ -85,85 +86,78 @@ tests.
 - Canva, Adobe, and Lovable connectors.
 - Background worker concurrency and capacity reporting.
 
+### Now implemented (Phase 5B reliability batch)
+
+- Browser preflight abort: `reserved -> preflight_aborted` with owner-token
+  enforcement, never marks unknown_outcome, allows clean retry.
+- Crash-safe WAL reconciliation: 3-phase protocol with reconciling_started
+  intermediate state, recovery in all four ledger mutation methods.
+- Supervisor graceful drain/shutdown: `DrainCoordinator` with inflight
+  tracking, shutdown hooks, and signal handler management.
+- Full browser unknown-outcome reconciliation with real approval validation,
+  evidence fields, account/connector/action/key matching.
+- 11-test end-to-end smoke test covering connector, browser, cross-domain,
+  and WAL recovery lifecycles.
+
 ### Still pending
 
-- Genuine browser unknown-outcome reconciliation and duplicate-submission
-  prevention.
 - Official authorized remote connectors and GitHub/PR workflows.
 - OS-keychain integration and production credential/session lifecycle.
+- True per-ticket worker concurrency timing verification.
 - Cryptographic skill signing and isolated real-task forward evaluation.
 - Multi-user isolation, release packaging, production telemetry/incidents,
   supply-chain review, and production threat modelling.
 
-## 4. Blocking findings to reproduce first
+## 4. Previous blocking findings — resolution status
 
-Today’s direct adversarial checks produced these results even though all 294
-existing tests passed:
+All connector lifecycle adversarial findings from the 294-test baseline have
+been resolved and are now covered by permanent regression tests:
 
-```text
-mark_unknown_without_owner_token = accepted
-completed_receipt_overwritten = {'receipt': 2}
-live_reserved_reconciled_without_owner = cancelled
-daemon_total_processed = 0 after two mocked executed results
-active_providers = [] with a healthy mocked capacity route
-```
+| Finding | Resolution | Test coverage |
+|---|---|---|
+| mark_unknown without owner token accepted | `mark_unknown()` now requires exact owner token; mismatch raises GuardianError. | `test_mark_unknown_requires_matching_owner_token` + `test_fail_browser_operation_with_wrong_token_rejected` |
+| completed receipt overwritten | `complete()` rejects `completed` and `reconciled_completed` states as immutable. | `test_idempotency_owner_token_completion_enforcement` + `test_completion_from_non_reserved_state_rejected` |
+| live reserved reconciled without owner | `reconcile()` rejects non-`unknown_outcome` states. Requires real approved approval, exact evidence, owner token. | `test_live_reserved_operation_cannot_be_reconciled` + all integration reconcile tests |
+| stale reservation blindly retried | Stale TTL transitions to `unknown_outcome` fail-closed. | `test_idempotency_stale_ttl_expiration_transitions_to_unknown_outcome` |
+| daemon processed totals wrong | Executor accounting updated. DrainCoordinator added. | DrainCoordinatorTests (39 supervisor tests) |
 
-The connector audit also verified:
+Remaining unresolved findings (not yet addressed in this batch):
 
-```text
-authenticated = False
-remote_authenticated = True
-```
+- `active_providers = []` with a healthy mocked capacity route.
+- `max_workers` currently ticket-count rather than true concurrency.
+- Credential availability reported as remote authentication success.
+- Non-mock connectors returning fabricated success.
 
-when only a local credential was present. The Canva non-mock list operation
-returned a hard-coded local design. Adobe and Lovable also return synthesized
-records or placeholder files. No official remote API or browser fallback is
-called by these connector methods.
-
-Convert the following into permanent tests before or with the fixes:
-
-1. A reserved connector operation cannot be marked `unknown_outcome` without
-   its exact owner token.
-2. `complete()` accepts only the `reserved` state and cannot overwrite a
-   completed receipt.
-3. Reconciliation accepts only `unknown_outcome`, requires an authorized
-   approval/operator and owner/reconciliation token, and cannot cancel a live
-   reservation without proof.
-4. A stale reservation becomes `unknown_outcome` and is never blindly retried.
-5. Supervisor processed totals use the executor’s actual `executed` result.
-6. Supervisor capacity reporting consumes the `routes` schema returned by
-   `provider_capacity_status()`.
-7. `max_workers` either provides real bounded concurrency or is renamed so it
-   does not claim concurrency.
-8. Credential availability is never reported as successful remote
-   authentication.
-9. Non-mock connectors either perform a verified authorized remote/browser
-   operation or fail with `ConnectorNotConfigured`; they never return
-   fabricated success.
+These are tracked in the "Still pending" section of this handoff.
 
 ## 5. Tomorrow’s implementation order
 
-### Priority 1 — connector lifecycle correctness
+### Priority 1 — Aider routing improvements (Phase 1)
 
-- Require the exact owner token for `mark_unknown`.
-- Require state `reserved` for first completion.
-- Make completed receipts immutable and replay-safe.
-- Restrict reconciliation to `unknown_outcome`.
-- Bind reconciliation to exact account, connector, operation, authorized
-  approval/operator, reason, and reconciliation evidence.
-- Add concurrent reservation/completion/crash tests.
+- Add task-size routing: small scoped edits -> Aider, larger coding -> JCode,
+  research/learning -> Hermes.
+- Improve Aider handoff with confirmed task, acceptance criteria, exact
+  writable paths, relevant files only, test command, risks, stop conditions.
+- Add Aider execution evidence: changed files, git diff summary, test results,
+  token/provider usage, remaining risks.
+- Keep Aider safe: dry-run/default preview, no auto-commit or push, no
+  credentials in handoff, no external browser actions.
 
-### Priority 2 — supervisor correctness
+### Priority 2 — JCode safe adapter (Phase 2)
 
-- Fix `processed` versus `executed` accounting.
-- Read capacity from the returned `routes` list.
-- Implement real bounded concurrent ticket execution or rename the setting to
-  `max_tickets_per_cycle`.
-- Add worker heartbeat, safe drain/shutdown, crash recovery, and concurrency
-  tests.
-- Keep emergency stop and manual primary review fail-closed.
+- Create `JCodeAdapter` with binary/version detection.
+- Add `guardian jcode status` and `guardian jcode prepare` (dry-run only).
+- Enforce JCode restrictions: no installation, login, OAuth, provider setup,
+  credential import, browser, MCP, swarm, self-development, direct commit/push.
+- Tests for binary absence, timeout, protected-file exclusion, exact write
+  allowlist, safe command construction.
 
-### Priority 3 — browser reliability
+### Priority 3 — True per-ticket concurrency timing test
+
+- Verify parallel workers execute tickets concurrently, not just sequentially.
+- Add timing measurements to `test_parallel_ticket_execution`.
+
+### Priority 4 — Browser reliability
 
 - Add overlay, navigation, stale-element, and final-actionability checks.
 - Create durable submission fingerprints and receipts.

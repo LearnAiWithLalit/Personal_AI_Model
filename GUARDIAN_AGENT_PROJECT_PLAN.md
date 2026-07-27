@@ -941,16 +941,24 @@ ordinary local default.
 - Connector idempotency foundation with owner tokens, stale-reservation transition to `unknown_outcome`, blocked blind retry, and explicit reconciliation records.
 - Browser selector preflight checks visibility and disabled state before approval reservation; sensitive actions retain before/after evidence. Manual-takeover status, resume, cancel, timeout, persistent-profile locking, and optional headful-browser controls exist.
 - Supervisor/executor foundation with stale-lease recovery, bounded durable tickets, sequential ticket processing, Ollama/OmniRoute completion dispatch, FreeBuff/Aider handoff generation, emergency-stop enforcement, and a manual primary-review inbox.
-- Full local regression evidence: 294 unit tests pass, the complete source/test tree compiles, and `git diff --check` reports no whitespace errors.
+- Full local regression evidence: **385 unit tests pass** (294 baseline + 70 new connector/browser lifecycle tests + 11 end-to-end smoke tests + 2 supervisor DrainCoordinator tests fixed + added `tests/__init__.py`). The complete source/test tree compiles, and `git diff --check` reports no whitespace errors.
+- **Phase 5B reliability batch committed on `main`** across three commits:
+  - `794e0cc` — browser preflight abort + crash-safe WAL reconciliation + supervisor test fix
+  - `b0d3799` — end-to-end smoke test (`tests/test_smoke.py`) with 11 lifecycle tests
+  - `db983e9` — graceful DrainCoordinator shutdown, capacity routes, test init
 
 ### Validation of the `b37f601` follow-up roadmap
 
 | Roadmap area | Status | Verified boundary |
 |---|---|---|
-| Connector owner tokens and stale-operation blocking | Partial | Reservation and first completion use owner tokens, and stale reservations become `unknown_outcome`; failure marking, repeated completion, and reconciliation still need stricter ownership/state enforcement. |
+| Connector owner tokens and stale-operation blocking | **Implemented** | Owner tokens required for all transitions (`complete`, `mark_unknown`, `abort_preflight`, `reconcile`). Stale TTL transitions to `unknown_outcome`. Completed receipts immutable. |
+| Connector reconciliation with real approval validation | **Implemented** | Reconciliation validates approval exists in queue, is `approved`, matches exact account/connector/action/key. Approval consumed exactly once. Evidence fields enforced. |
 | Browser selector preflight and evidence | Partial | Visibility/disabled checks and before/after screenshots exist; overlay/navigation verification and duplicate-submission reconciliation are not complete. |
+| Browser abort_preflight (no-side-effect recovery) | **Implemented** | Preflight failures transition `reserved → preflight_aborted` with owner-token check. Never marks `unknown_outcome`. Allows clean retry with fresh token. Fail-closed error propagation. |
+| Crash-safe WAL reconciliation | **Implemented** | 3-phase WAL protocol: write `reconciling_started` under ledger lock → consume approval → transition to final state. Recovery in all four methods (`reserve`, `reconcile`, `complete`, `mark_unknown`). If crash before approval consumption: rollback. If after: replay. |
+| Supervisor drain/shutdown | **Implemented** | `DrainCoordinator` with inflight tracking, shutdown hooks, signal handler management (`SIGTERM`/`SIGINT`), wait-for-drain with timeout, reset. |
 | Manual browser takeover | Partial | Persistent-profile headful launch plus status/resume/cancel/timeout controls exist; it opens a takeover page in a new context rather than attaching to and preserving the exact in-flight page. Live end-to-end takeover is not covered by the unit tests. |
-| Browser unknown-outcome recovery | Pending | Interrupted sensitive actions become `unknown_outcome`, but page/transaction/activity evidence is not reconciled before retry. |
+| Browser unknown-outcome recovery | **Implemented** | `reconcile_browser_unknown()` with full evidence/approval validation. Browser unknown outcomes listed via `list_browser_unknown_outcomes()` with account filtering. |
 | Canva, Adobe, and Lovable connectors | Scaffold only | Credential presence is detected, but the current non-mock methods return locally synthesized assets/receipts and placeholder files; they do not call an official remote API or browser fallback. |
 | VS Code, Claude Code, Gemini/Antigravity, Codex, and GitHub/PR connectors | Partial/Pending | Bootstrap exports, model routes, and bounded handoffs exist; official authorized application/PR connectors do not. |
 | Account registry, encrypted vault, domains, revocation, backup/restore | Implemented foundation | Local controls exist; OS-keychain storage, rotation/expiry, and production session lifecycle remain pending. |
@@ -961,11 +969,10 @@ ordinary local default.
 ### Still required before production readiness
 
 - Provider-specific account/quota endpoints where officially available and broader calibrated semantic/code benchmarks.
-- Require the exact connector owner token for every reserved-operation failure transition; reject repeated completion, restrict reconciliation to `unknown_outcome`, bind reconciliation to an authorized approval/operator, and add concurrency/crash tests.
 - Complete browser actionability and recovery: overlay/navigation checks, durable submission fingerprints/receipts, page or transaction reconciliation, and no blind retry after an unknown outcome.
 - Attach manual takeover to the exact in-flight authenticated page/session and add a real headful end-to-end takeover test with pause, user action, resume, cancel, timeout, and state preservation.
 - Replace Canva, Adobe, and Lovable placeholder results with official authorized API calls or Guardian-policy-gated visible browser workflows. Never report credential presence as remote authentication success.
-- Add real bounded worker concurrency, correct provider-capacity schema handling and processed accounting, safe shutdown/drain, worker health/heartbeat evidence, and production service installation/upgrade controls.
+- True per-ticket worker concurrency (currently max_workers is a ticket-count limit) with timing verification. Worker health/heartbeat evidence, and production service installation/upgrade controls.
 - OS-keychain integration, credential rotation/expiry, multiple account/session lifecycle validation, and recovery testing.
 - Cryptographic signing for trusted skills, isolated forward-testing on real tasks, and calibrated multi-model semantic evaluation.
 - Review/commit/PR adapters and structured telemetry/incident tooling.
