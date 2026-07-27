@@ -4,7 +4,7 @@ Prepared: 2026-07-28 (Asia/Kolkata)
 Repository: `https://github.com/LearnAiWithLalit/Personal_AI_Model`
 Workspace: `/media/lalit/HIKVISION1/AI agent model`
 Branch: `main`
-Committed base at handoff: `08dbceb` (+ uncommitted Phase 1, Phase 2, Phase 3, Phase 4, Priority 3 changes)
+Committed base at handoff: `4f02e4b` (Phase 1-6 + Priority 2 + Priority 3 all committed)
 
 ## 1. Start here tomorrow
 
@@ -40,19 +40,20 @@ tests.
 
 ## 2. Verified baseline today
 
-- Full local suite: **451 tests passed** (385 baseline + Phase 1/2/3/4 + Priority 2 + Priority 3 additions).
+- Full local suite: **507 tests passed** (385 baseline + Phase 1/2/3/4 + Phase 5/6 + Priority 2 + Priority 3 additions).
 - New focused tests added:
   - **24 Aider tests** (6 original + 18 Phase 1: classification, enhanced handoff, execution evidence, path filtering)
   - **47 JCode tests** (19 Phase 2 + 10 Phase 3 + 18 Phase 4)
+  - **34 Hermes tests** (12 Phase 5 + 22 Phase 6: status, handoff, opt-in, execution, memory isolation, schedule, run-due)
   - **50 browser tests** (28 original + 22 new: overlay detection, page settlement, stale-element checks, submission fingerprints, reconciliation, page-context takeover)
   - **42 connector tests** (existing + expanded for Canva/Adobe/Lovable real API calls)
   - **39 supervisor tests**
   - **11 executor worker tests**
 - Source and tests compiled.
 - `git diff --check` passed.
-- New source files: `src/guardian_agent/jcode.py`, `tests/test_jcode.py`
-- Modified source files: `src/guardian_agent/browser_operator.py`, `src/guardian_agent/cli.py`, `src/guardian_agent/connectors.py`, `src/guardian_agent/aider.py`, `src/guardian_agent/executor_worker.py`, `src/guardian_agent/jcode.py`
-- Modified test files: `tests/test_browser.py`, `tests/test_connectors.py`, `tests/test_aider.py`, `tests/test_supervisor.py`, `tests/test_executor_worker.py`, `tests/test_jcode.py`
+- New source files: `src/guardian_agent/jcode.py`, `tests/test_jcode.py`, `src/guardian_agent/hermes.py`, `tests/test_hermes.py`
+- Modified source files: `src/guardian_agent/browser_operator.py`, `src/guardian_agent/cli.py`, `src/guardian_agent/connectors.py`, `src/guardian_agent/aider.py`, `src/guardian_agent/executor_worker.py`, `src/guardian_agent/jcode.py`, `src/guardian_agent/hermes.py`
+- Modified test files: `tests/test_browser.py`, `tests/test_connectors.py`, `tests/test_aider.py`, `tests/test_supervisor.py`, `tests/test_executor_worker.py`, `tests/test_jcode.py`, `tests/test_hermes.py`
 
 ## 3. Honest current status
 
@@ -240,6 +241,55 @@ tests.
   vs real API.
 - **42 connector tests** pass.
 
+### Now implemented (Phase 5 — Hermes optional learning/research worker)
+
+- **Binary detection**: `hermes_status()` — `shutil.which("hermes")` for PATH
+  detection, version with 15s timeout, reports unavailable state safely.
+- **Tools-disabled handoff**: `create_hermes_handoff()` — generates a handoff
+  document with 13 enforced restrictions (`no-browser`, `no-mcp`,
+  `no-messaging-gateway`, `no-credential-import`, `no-self-development`, etc.)
+  and explicit "Tools-disabled profile" section.
+- **Task-type restrictions**: Only `research`, `planning`, `skill-evaluation`,
+  and `summary` types allowed. Other types rejected with clear error.
+- **Explicit user opt-in**: `hermes_opt_in()` / `hermes_is_opted_in()` — stores
+  consent in `.agent/hermes_consent.json`. Execution blocked without opt-in.
+- **Bounded execution**: `execute_hermes_task()` — configurable timeout
+  (10-3600s), stdout/stderr/exit-code capture, isolated memory output.
+- **Memory isolation**: Separate `hermes_memory/` directory under `.agent/`.
+  `import_hermes_lesson()` is the ONLY import path into Guardian's learning
+  library — requires sanitized, user-approved content; raw Hermes output is
+  never automatically imported.
+- **Environment sandboxing**: `HERMES_TOOLS_DISABLED=1`, `HERMES_NO_TELEMETRY=1`,
+  `HERMES_API_KEY`, `HERMES_AUTH_TOKEN`, and `HERMES_MESSAGING_TOKEN` stripped
+  from child environment.
+- **13 restrictions enforced**: no-install, no-login, no-oauth, no-provider-setup,
+  no-credential-import, no-browser, no-mcp, no-swarm, no-self-development,
+  no-commit-push, no-messaging-gateway, no-scheduling, no-external-actions.
+- **CLI commands**: `guardian hermes status`, `guardian hermes opt-in`,
+  `guardian hermes prepare`, `guardian hermes run`, `guardian hermes memory`,
+  `guardian hermes import-lesson`.
+- **12 tests** covering status, handoff, opt-in, execution, memory isolation.
+
+### Now implemented (Phase 6 — Controlled background work)
+
+- **Scheduled task types**: Only `health-check`, `research-summary`,
+  `skill-evaluation`, and `maintenance-proposal` are allowed.
+- **Approval-gated scheduling**: `hermes_schedule_task()` consumes a real
+  approval via `consume_action_approval()` before adding any task. Approval
+  must target `hermes:<task-type>`.
+- **Interval enforcement**: Minimum 300s (5 minutes), maximum 7 days.
+  `hermes_list_scheduled()` shows due/not-due status with epoch timestamps.
+- **Run due tasks**: `hermes_run_due_tasks()` — max 5 tasks per run (configurable
+  1-10), force option to skip schedule timing, optional task-type filter.
+- **External actions blocked**: All results have `change_proposed: False`.
+  Results are stored in Hermes isolated memory for human/primary-model review.
+- **Exponential backoff on failure**: Failed tasks back off with `60 * 2^failures`
+  (capped at 86400s/1 day). Failure count and last error persisted.
+- **CLI commands**: `guardian hermes schedule`, `guardian hermes list-scheduled`,
+  `guardian hermes unschedule`, `guardian hermes run-due`.
+- **22 tests** covering scheduling, listing, unscheduling, run-due execution,
+  interval validation, approval consumption, failure handling.
+
 ### Still pending
 
 - Official authorized remote connectors and GitHub/PR workflows.
@@ -247,7 +297,6 @@ tests.
 - Cryptographic skill signing and isolated real-task forward evaluation.
 - Multi-user isolation, release packaging, production telemetry/incidents,
   supply-chain review, and production threat modelling.
-- Phase 5 — Hermes optional learning/research worker.
 
 ## 4. Previous blocking findings — resolution status
 
@@ -284,6 +333,8 @@ These are tracked in the "Still pending" section of this handoff.
 - ~~Phase 2 — JCode safe adapter (first milestone)~~
 - ~~Phase 3 — JCode controlled execution (sandbox, timeout, cancellation, capture)~~
 - ~~Phase 4 — JCode bounded parallel work (max 2 workers, path locking, conflict detection, change notifications, stop conditions)~~
+- ~~Phase 5 — Hermes optional learning/research worker~~
+- ~~Phase 6 — Controlled background work~~
 - ~~Priority 3 — True per-ticket concurrency timing test~~
 - ~~Priority 1 — Browser reliability (overlay/navigation checks, submission fingerprints, page-state reconciliation, page-context takeover, CLI reconcile)~~
 - ~~Priority 2 — Real connectors (Canva, Adobe, Lovable real API implementations)~~
