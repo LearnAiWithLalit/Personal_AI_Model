@@ -1,8 +1,10 @@
-"""Bounded local supervisor for Guardian execution records (Phase 5 Autonomous Daemon Hardened).
+"""Bounded local supervisor for Guardian execution records (Phase 5B Graceful Drain & Shutdown).
 
 The supervisor is a durable coordination layer. It inspects execution records,
 recovers stale leases, writes bounded executor tickets, monitors provider capacity,
-and orchestrates autonomous background worker loop execution up to max_workers limit.
+and orchestrates autonomous background worker loop execution up to max_workers limit
+with graceful shutdown/drain semantics (SIGTERM/SIGINT handling, drain coordination,
+and safe shutdown hooks).
 """
 
 from __future__ import annotations
@@ -21,7 +23,12 @@ from guardian_agent.execution import (
     recover_execution,
 )
 from guardian_agent.model_policy import is_model_allowed
-from guardian_agent.runtime import is_kill_switch_active
+from guardian_agent.runtime import (
+    DrainCoordinator,
+    install_drain_signal_handlers,
+    is_kill_switch_active,
+    restore_signal_handlers,
+)
 
 _SUPERVISOR_DIR = Path("tasks") / "supervisor"
 _MAX_ITEMS_PER_RUN = 100
@@ -259,8 +266,12 @@ def supervisor_run_once(brain: ProjectBrain) -> dict[str, Any]:
     }
 
 
+# Module-level drain coordinator reference (set during daemon run, cleared after)
+_current_drain: DrainCoordinator | None = None
+
+
 def supervisor_status(brain: ProjectBrain) -> dict[str, Any]:
-    """Return read-only supervisor state and ticket information."""
+    """Return read-only supervisor state, ticket information, and drain status."""
     directory = _supervisor_directory(brain)
     state = _read_json(directory / "state.json")
 
@@ -271,6 +282,16 @@ def supervisor_status(brain: ProjectBrain) -> dict[str, Any]:
         payload = _read_json(path)
         if payload:
             tickets.append(payload)
+
+    drain = _current_drain
+    drain_state: str = "inactive"
+    if drain is not None:
+        if drain.is_drained():
+            drain_state = "drained"
+        elif drain.is_draining():
+            drain_state = "draining"
+        else:
+            drain_state = "active"
 
     return {
         "active_lock": _lock_is_active(brain),
@@ -287,6 +308,11 @@ def supervisor_status(brain: ProjectBrain) -> dict[str, Any]:
             for ticket in tickets
             if ticket.get("state") == "awaiting_primary_review"
         ],
+        "drain": {
+            "state": drain_state,
+            "inflight": drain.inflight_count if drain is not None else 0,
+            "hooks": len(drain._shutdown_hooks) if drain is not None else 0,  # type: ignore[arg-type]
+        } if drain is not None else None,
     }
 
 
@@ -297,87 +323,174 @@ def supervisor_daemon_run(
     max_workers: int = 4,
     indefinite: bool = False,
 ) -> dict[str, Any]:
-    """Run an autonomous background worker daemon loop.
+    """Run an autonomous background worker daemon loop with graceful shutdown/drain.
 
     Coordinates supervisor cycles, recovers stale stage leases, checks provider capacity,
     claims tickets safely under process locks, and processes ready tasks concurrently up to max_workers limit.
+
+    **Graceful Shutdown / Drain:**
+      - Install SIGTERM/SIGINT handlers that trigger drain on first receipt.
+      - During drain, no new supervisor cycles or ticket processing is started;
+        the current cycle finishes before exit.
+      - Registered shutdown hooks execute during drain completion.
+      - If a second signal or emergency stop is received, the loop exits immediately.
     """
+    global _current_drain
+
     if interval_seconds < 1 or interval_seconds > 3600:
         raise GuardianError("interval_seconds must be between 1 and 3600.")
     if max_workers < 1 or max_workers > 16:
         raise GuardianError("max_workers must be between 1 and 16.")
 
-    from concurrent.futures import ThreadPoolExecutor
-    from guardian_agent.executor_worker import process_ready_tickets
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from guardian_agent.executor_worker import list_ready_tickets, execute_ticket
     from guardian_agent.provider_capacity import provider_capacity_status
 
-    cycles = []
+    # 1. Create drain coordinator and register module-level reference
+    drain = DrainCoordinator()
+    _current_drain = drain
+
+    # 2. Install signal handlers for graceful shutdown
+    restored_handlers = install_drain_signal_handlers(drain)
+
+    # 3. Register default shutdown hooks
+    def _drain_completed_hook() -> None:
+        append_journey(
+            brain,
+            "Supervisor Daemon Drain Completed",
+            ["Drain hook executed, resources cleaned up."],
+        )
+    drain.add_shutdown_hook(_drain_completed_hook)
+
+    cycles: list[dict[str, Any]] = []
     processed_count = 0
     cycle_index = 0
+    exit_reason = "completed"
 
-    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="guardian-worker") as executor_pool:
-        while True:
-            if is_kill_switch_active(brain):
-                append_journey(brain, "Supervisor Daemon Stopped", ["Emergency stop activated."])
-                break
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="guardian-worker") as executor_pool:
+            while True:
+                # ---- Drain / Kill-switch / Limit checks ----
 
-            if not indefinite and max_cycles and cycle_index >= max_cycles:
-                break
+                if drain.is_draining():
+                    exit_reason = "drained"
+                    # Allow current in-flight work to finish
+                    drain.wait_for_drain(timeout=30.0)
+                    break
 
-            cycle_start = time.time()
-            cycle_res = supervisor_run_once(brain)
+                if is_kill_switch_active(brain):
+                    exit_reason = "emergency_stop"
+                    drain.request_drain()  # Ensure hooks run
+                    drain.wait_for_drain(timeout=5.0)
+                    append_journey(brain, "Supervisor Daemon Stopped", ["Emergency stop activated."])
+                    break
 
-            cap = provider_capacity_status(brain)
-            routes = cap.get("routes", [])
-            active_providers = [
-                f"{r.get('provider')}:{r.get('model')}"
-                for r in routes
-                if not r.get("currently_blocked")
-            ]
+                if not indefinite and max_cycles is not None and cycle_index >= max_cycles:
+                    exit_reason = "completed"
+                    break
 
-            if is_kill_switch_active(brain):
+                # ---- Supervisor cycle ----
+                cycle_start = time.time()
+                cycle_res = supervisor_run_once(brain)
+
+                cap = provider_capacity_status(brain)
+                routes = cap.get("routes", [])
+                active_providers = [
+                    f"{r.get('provider')}:{r.get('model')}"
+                    for r in routes
+                    if not r.get("currently_blocked")
+                ]
+
+                # Re-check drain before dispatching ticket work
+                if drain.is_draining():
+                    exit_reason = "drained"
+                    break
+
+                if is_kill_switch_active(brain):
+                    exit_reason = "emergency_stop"
+                    break
+
+                # ---- Per-ticket parallel dispatch ----
+                # Each ready ticket is submitted as an individual future to the
+                # thread pool so max_workers controls true concurrent ticket
+                # execution rather than a single sequential batch.
+                tickets = list_ready_tickets(brain, limit=max_workers)
+                executed_list: list[dict[str, Any]] = []
+                error_list: list[dict[str, Any]] = []
+                futures: list[Any] = []
+
+                for ticket in tickets:
+                    if drain.is_draining() or is_kill_switch_active(brain):
+                        break
+                    drain.register_inflight()
+                    future = executor_pool.submit(
+                        execute_ticket, brain, ticket, dry_run=False
+                    )
+                    futures.append(future)
+
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                        executed_list.append(result)
+                    except Exception as err:
+                        from guardian_agent.vault import redact_secrets
+
+                        clean_err = redact_secrets(brain, str(err))
+                        error_list.append({
+                            "ticket_id": (
+                                getattr(err, "stage_id", None)
+                                or "unknown"
+                            ),
+                            "error": clean_err,
+                        })
+                    finally:
+                        drain.complete_inflight()
+
+                processed_now = len(executed_list)
+                processed_count += processed_now
+
                 cycles.append({
                     "cycle": cycle_index + 1,
                     "timestamp": now_utc(),
                     "supervisor": cycle_res,
-                    "processed_tickets": 0,
+                    "processed_tickets": processed_now,
                     "active_providers": active_providers,
                 })
+
                 cycle_index += 1
-                break
 
-            # Dispatch ticket processing to background worker pool
-            future = executor_pool.submit(process_ready_tickets, brain, max_tickets=max_workers)
-            work_res = future.result()
+                # Re-check exit conditions after cycle
+                if drain.is_draining():
+                    exit_reason = "drained"
+                    break
+                if is_kill_switch_active(brain):
+                    exit_reason = "emergency_stop"
+                    break
+                if not indefinite and max_cycles is not None and cycle_index >= max_cycles:
+                    exit_reason = "completed"
+                    break
 
-            executed_list = work_res.get("executed", work_res.get("processed", []))
-            processed_now = len(executed_list)
-            processed_count += processed_now
-
-            cycles.append({
-                "cycle": cycle_index + 1,
-                "timestamp": now_utc(),
-                "supervisor": cycle_res,
-                "processed_tickets": processed_now,
-                "active_providers": active_providers,
-            })
-
-            cycle_index += 1
-
-            if is_kill_switch_active(brain):
-                break
-
-            if not indefinite and max_cycles and cycle_index >= max_cycles:
-                break
-
-            elapsed = time.time() - cycle_start
-            sleep_dur = max(0.1, interval_seconds - elapsed)
-            time.sleep(sleep_dur)
+                # ---- Sleep between cycles (skip if draining) ----
+                elapsed = time.time() - cycle_start
+                sleep_dur = max(0.1, interval_seconds - elapsed)
+                if not drain.is_draining():
+                    time.sleep(sleep_dur)
+    finally:
+        # 4. Clean up: restore signal handlers and clear module reference
+        try:
+            drain.wait_for_drain(timeout=5.0)
+        except Exception:
+            pass
+        try:
+            restore_signal_handlers(restored_handlers)
+        finally:
+            _current_drain = None
 
     append_journey(
         brain,
         "Supervisor Daemon Loop Completed",
         [
+            f"Exit reason: {exit_reason}",
             f"Total Cycles: {cycle_index}",
             f"Processed Tickets: {processed_count}",
             f"Emergency Stop Active: {is_kill_switch_active(brain)}",
@@ -385,8 +498,9 @@ def supervisor_daemon_run(
     )
 
     return {
-        "status": "stopped" if is_kill_switch_active(brain) else "completed",
-        "stopped": is_kill_switch_active(brain),
+        "status": exit_reason,
+        "stopped": exit_reason in ("drained", "emergency_stop"),
+        "drained": exit_reason == "drained",
         "cycles_completed": cycle_index,
         "total_processed": processed_count,
         "emergency_stop": is_kill_switch_active(brain),

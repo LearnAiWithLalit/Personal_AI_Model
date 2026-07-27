@@ -1,7 +1,8 @@
-"""Durable Task Runtime, Job Queue & Crash Recovery (Phase G0).
+"""Durable Task Runtime, Job Queue, Crash Recovery & Graceful Drain Coordinator (Phase 5B).
 
 Provides persistent job queues, priorities, task locks, idempotency keys,
-checkpointing, pause/resume, retry limits, and an emergency stop/kill switch.
+checkpointing, pause/resume, retry limits, an emergency stop/kill switch,
+and a thread-safe DrainCoordinator for graceful supervisor daemon shutdown.
 Hardened with atomic file locks, atomic temp-file replacement, and corruption recovery.
 """
 
@@ -10,9 +11,13 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import signal
+import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Any, Callable
+
 from guardian_agent.core import GuardianError, ProjectBrain, append_journey, now_utc, markdown_escape
 from guardian_agent.policy import consume_action_approval
 
@@ -323,3 +328,157 @@ def resume_after_kill_switch(brain: ProjectBrain, approval_id: str) -> dict:
         [f"Approval: {approval_id}", "Cancelled tasks were not automatically requeued."],
     )
     return {"active": False, "approval_id": approval_id}
+
+
+# ---------------------------------------------------------------------------
+# Graceful Drain Coordinator (Phase 5B)
+# ---------------------------------------------------------------------------
+
+
+class DrainCoordinator:
+    """Thread-safe coordinator for graceful supervisor daemon shutdown/drain.
+
+    States:
+      - Running (default): normal operation, new work is accepted.
+      - Draining: drain was requested (e.g. via SIGTERM/SIGINT).
+        In-flight work continues but no new work is dispatched.
+      - Drained: all in-flight work completed after drain request.
+
+    Shutdown hooks can be registered to run during the drain completion phase.
+    """
+
+    def __init__(self) -> None:
+        self._drain_requested = threading.Event()
+        self._lock = threading.Lock()
+        self._inflight_count: int = 0
+        self._shutdown_hooks: list[Callable[[], None]] = []
+
+    # --- Drain signaling ---
+
+    def request_drain(self) -> None:
+        """Signal that a graceful drain should begin.
+
+        In-flight work is allowed to finish; the daemon loop will stop
+        dispatching new work and exit after drain completes.
+        """
+        self._drain_requested.set()
+
+    def is_draining(self) -> bool:
+        """Return True if drain has been requested."""
+        return self._drain_requested.is_set()
+
+    # --- In-flight tracking ---
+
+    def register_inflight(self) -> None:
+        """Record one unit of work that has started."""
+        with self._lock:
+            self._inflight_count += 1
+
+    def complete_inflight(self) -> None:
+        """Record completion of one unit of work."""
+        with self._lock:
+            if self._inflight_count > 0:
+                self._inflight_count -= 1
+
+    @property
+    def inflight_count(self) -> int:
+        with self._lock:
+            return self._inflight_count
+
+    def is_drained(self) -> bool:
+        """Return True if drain was requested AND no in-flight work remains."""
+        return self.is_draining() and self.inflight_count == 0
+
+    # --- Shutdown hooks ---
+
+    def add_shutdown_hook(self, hook: Callable[[], None]) -> None:
+        """Register a cleanup callback invoked when drain completes."""
+        with self._lock:
+            self._shutdown_hooks.append(hook)
+
+    def _run_shutdown_hooks(self) -> None:
+        """Execute all registered shutdown hooks, swallowing exceptions."""
+        hooks: list[Callable[[], None]] = []
+        with self._lock:
+            hooks = list(self._shutdown_hooks)
+            self._shutdown_hooks.clear()
+        for hook in hooks:
+            try:
+                hook()
+            except Exception:
+                pass
+
+    # --- Await drain completion ---
+
+    def wait_for_drain(self, timeout: float = 30.0) -> bool:
+        """Block until all in-flight work finishes or *timeout* seconds elapse.
+
+        Shutdown hooks are executed before blocking.
+
+        Returns:
+            True if fully drained (no in-flight work remains), False if timed out.
+        """
+        self._run_shutdown_hooks()
+        deadline = time.monotonic() + max(0.1, timeout)
+        while time.monotonic() < deadline:
+            if self.is_drained():
+                return True
+            time.sleep(0.1)
+        return self.is_drained()
+
+    def reset(self) -> None:
+        """Reset the coordinator to its initial (Running) state.
+
+        This is primarily useful in tests.
+        """
+        self._drain_requested.clear()
+        with self._lock:
+            self._inflight_count = 0
+            self._shutdown_hooks.clear()
+
+    def __repr__(self) -> str:
+        state = "draining" if self.is_draining() else "active"
+        return (
+            f"<DrainCoordinator state={state} "
+            f"inflight={self.inflight_count} "
+            f"hooks={len(self._shutdown_hooks)}>"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Signal handlers for graceful shutdown
+# ---------------------------------------------------------------------------
+
+
+def install_drain_signal_handlers(
+    drain: DrainCoordinator,
+    signals: tuple[int, ...] = (signal.SIGTERM, signal.SIGINT),
+) -> list[tuple[int, Any]]:
+    """Install signal handlers that trigger drain on the given signals.
+
+    Must be called from the **main thread** (signal.signal restriction).
+
+    Returns:
+        List of (signum, original_handler) tuples for later restoration.
+    """
+    def _handler(signum: int, frame: Any | None) -> None:
+        drain.request_drain()
+
+    restored: list[tuple[int, Any]] = []
+    for sig in signals:
+        try:
+            original = signal.signal(sig, _handler)
+            restored.append((sig, original))
+        except (ValueError, OSError):
+            # Not in main thread or signal not supported
+            pass
+    return restored
+
+
+def restore_signal_handlers(restored: list[tuple[int, Any]]) -> None:
+    """Restore previously saved signal handlers."""
+    for sig, handler in restored:
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass
