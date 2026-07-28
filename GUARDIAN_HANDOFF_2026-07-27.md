@@ -40,18 +40,20 @@ tests.
 
 ## 2. Verified baseline today
 
-- Full local suite: **507 tests passed** (385 baseline + Phase 1/2/3/4 + Phase 5/6 + Priority 2 + Priority 3 additions).
+- Full local suite: **548 tests passed** (385 baseline + Phase 1/2/3/4 + Phase 5/6 + Phase 7 + Priority additions).
 - New focused tests added:
-  - **24 Aider tests** (6 original + 18 Phase 1: classification, enhanced handoff, execution evidence, path filtering)
-  - **47 JCode tests** (19 Phase 2 + 10 Phase 3 + 18 Phase 4)
-  - **34 Hermes tests** (12 Phase 5 + 22 Phase 6: status, handoff, opt-in, execution, memory isolation, schedule, run-due)
+  - **20 WorkerRouter tests** (Phase 7: availability, selection, integration, execute, and route classification)
+  - **8 CLI integration tests** (Phase 7: end-to-end route/execute CLI commands)
+  - **31 Aider tests** (+7 from previous: Colibri backend detection, availability, colibri in backends dict)
+  - **52 JCode tests** (+5 from previous: capability probe, required/recommended flag checks, dangerous command detection)
+  - **35 Hermes tests** (+1 from previous: Hermes execution fail-closed, now with isolated library_path)
   - **50 browser tests** (28 original + 22 new: overlay detection, page settlement, stale-element checks, submission fingerprints, reconciliation, page-context takeover)
   - **42 connector tests** (existing + expanded for Canva/Adobe/Lovable real API calls)
   - **39 supervisor tests**
   - **11 executor worker tests**
 - Source and tests compiled.
 - `git diff --check` passed.
-- New source files: `src/guardian_agent/jcode.py`, `tests/test_jcode.py`, `src/guardian_agent/hermes.py`, `tests/test_hermes.py`
+- New source files: `src/guardian_agent/jcode.py`, `tests/test_jcode.py`, `src/guardian_agent/hermes.py`, `tests/test_hermes.py`, `src/guardian_agent/worker_router.py`, `tests/test_worker_router.py`, `tests/test_cli_integration.py`
 - Modified source files: `src/guardian_agent/browser_operator.py`, `src/guardian_agent/cli.py`, `src/guardian_agent/connectors.py`, `src/guardian_agent/aider.py`, `src/guardian_agent/executor_worker.py`, `src/guardian_agent/jcode.py`, `src/guardian_agent/hermes.py`
 - Modified test files: `tests/test_browser.py`, `tests/test_connectors.py`, `tests/test_aider.py`, `tests/test_supervisor.py`, `tests/test_executor_worker.py`, `tests/test_jcode.py`, `tests/test_hermes.py`
 
@@ -335,6 +337,7 @@ These are tracked in the "Still pending" section of this handoff.
 - ~~Phase 4 — JCode bounded parallel work (max 2 workers, path locking, conflict detection, change notifications, stop conditions)~~
 - ~~Phase 5 — Hermes optional learning/research worker~~
 - ~~Phase 6 — Controlled background work~~
+- ~~Phase 7 — WorkerRouter: auto-select the best worker (Aider/JCode/Hermes) for a confirmed task~~
 - ~~Priority 3 — True per-ticket concurrency timing test~~
 - ~~Priority 1 — Browser reliability (overlay/navigation checks, submission fingerprints, page-state reconciliation, page-context takeover, CLI reconcile)~~
 - ~~Priority 2 — Real connectors (Canva, Adobe, Lovable real API implementations)~~
@@ -344,6 +347,7 @@ These are tracked in the "Still pending" section of this handoff.
 - OS keychain, credential rotation/expiry, session recovery.
 - Cryptographic skill signing, isolated real-task evaluation.
 - Multi-user isolation, release packaging, security review.
+- Colibri optional high-resource local inference adapter (pending user approval on eligible hardware).
 
 ## 6. JCode current state (Phase 4 complete)
 
@@ -410,7 +414,67 @@ First Colibri implementation should only add safe detection and mocked adapter
 tests. It must not download the model. A real smoke test happens only after the
 user approves setup on an eligible machine.
 
-## 8. Completion gate for tomorrow
+## 8. Phase 7 — WorkerRouter: auto-select the best worker
+
+**Goal:** Auto-classify a confirmed task and route it to the cheapest adequate
+worker (Aider for small coding tasks, JCode for large multi-file changes,
+Hermes for research/planning/summary).
+
+**Status: Implemented and verified.**
+
+### Worker routing logic (`worker_router.py`)
+
+- **`classify_task()`** — deterministic heuristic: tasks over 300 characters
+  or matching large-task patterns ("implement", "refactor", "multi-file") are
+  classified as `large` → JCode. Tasks matching research patterns ("research",
+  "investigate", "analyze") are `research` → Hermes. Everything else is
+  `small` → Aider.
+- **Worker availability detection** — checks each binary via `shutil.which()`:
+  `aider` for Aider, `jcode` for JCode, `hermes` for Hermes. Falls back to
+  the next available worker if the preferred one is missing.
+- **`route_task()`** — classifies the task, selects the best available worker,
+  builds the handoff (writable paths, test command, backend/model config).
+  Returns a structured routing result with `selected_worker`, `reasoning`,
+  and `handoff`.
+- **`execute_route()`** — takes a routing result and dispatches to the
+  selected worker's execution function (Aider `launch_aider`, JCode
+  `execute_jcode_in_sandbox`, Hermes `execute_hermes_task`). Respects each
+  worker's safety model (dry-run for Aider, sandbox for JCode, fail-closed
+  for Hermes).
+
+### CLI commands
+
+```bash
+guardian route analyze --task <task> --project .
+guardian route execute --task <task> --project . --allow-edits
+```
+
+### Backend support for Colibri
+
+- Colibri (`coli serve`) is added as a third Aider backend alongside Ollama
+  and OmniRoute, detected via `shutil.which("coli")`.
+- `_colibri_path()`, `_colibri_available()` helpers added.
+- Backend config at `BACKENDS["colibri"]`: `127.0.0.1:8000`,
+  `http://localhost:8000/v1`, no credential required.
+- CLI `--backend` choices expanded to include `"colibri"`.
+
+### JCode capability probe (safety hardening)
+
+- `jcode_capability_probe()` runs `jcode --help` to verify that required flags
+  (`--read`, `--message`, `--dry-run`) are supported before execution.
+- Checks for dangerous subcommands (`login`, `provider`, `server`, `client`,
+  `swarm`) and blocks execution if they are detected.
+- Refuses execution if any required flag is missing — fail-closed.
+
+### 20 WorkerRouter tests covering
+
+- Availability detection (all/none/single worker scenarios)
+- Task classification (small, large, research)
+- Routing integration (handoff content, writable paths, worker selection)
+- Route execution (dispatching to correct worker, with dry-run behavior)
+- 8 end-to-end CLI integration tests
+
+## 9. Completion gate for tomorrow
 
 Do not report completion merely because the legacy suite passes.
 

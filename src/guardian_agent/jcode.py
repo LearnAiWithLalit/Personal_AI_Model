@@ -77,6 +77,128 @@ def _timeout_version(executable: str, timeout: int = 15) -> str | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# JCode capability probing — verify supported flags against installed version
+# ---------------------------------------------------------------------------
+
+# Flags that Guardian requires JCode to support.
+_REQUIRED_FLAGS = frozenset({
+    "--read",
+    "--message",
+    "--dry-run",
+})
+
+# Optional but strongly recommended flags.
+_RECOMMENDED_FLAGS = frozenset({
+    "--write",
+    "--test",
+})
+
+# Dangerous subcommands that Guardian must ensure are blocked.
+_DANGEROUS_SUBCOMMANDS = frozenset({
+    "login",
+    "provider",
+    "server",
+    "client",
+    "swarm",
+})
+
+
+def jcode_capability_probe(executable: str, timeout: int = 15) -> dict:
+    """Probe the installed JCode binary for supported flags and dangerous commands.
+
+    Runs `jcode --help` and parses the output to determine:
+    - Which Guardian-required flags are supported
+    - Which dangerous subcommands are present
+    - Whether Guardian can safely enforce its restrictions
+
+    Args:
+        executable: Path to the JCode binary.
+        timeout: Maximum seconds for the help command.
+
+    Returns:
+        Dict with:
+        - probed: bool (True if help output was parsed)
+        - version: str or None
+        - required_flags_supported: list[str]
+        - recommended_flags_supported: list[str]
+        - dangerous_commands_detected: list[str]
+        - can_enforce_restrictions: bool
+        - probe_error: str or None
+    """
+    result: dict = {
+        "probed": False,
+        "version": None,
+        "required_flags_supported": [],
+        "recommended_flags_supported": [],
+        "dangerous_commands_detected": [],
+        "can_enforce_restrictions": False,
+        "probe_error": None,
+    }
+
+    try:
+        # Get version first
+        version = _timeout_version(executable, timeout)
+        result["version"] = version
+
+        # Run --help to discover flags
+        completed = subprocess.run(
+            [executable, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if completed.returncode != 0:
+            result["probe_error"] = f"jcode --help exited with code {completed.returncode}"
+            return result
+
+        help_text = completed.stdout + "\n" + completed.stderr
+        result["probed"] = True
+
+        # Check for required flags
+        for flag in _REQUIRED_FLAGS:
+            if flag in help_text:
+                result["required_flags_supported"].append(flag)
+
+        # Check for recommended flags
+        for flag in _RECOMMENDED_FLAGS:
+            if flag in help_text:
+                result["recommended_flags_supported"].append(flag)
+
+        # Check for dangerous subcommands using line-level regex
+        # Match lines like "  login    Authenticate" or "  swarm    Collaborate"
+        # but NOT "--provider-profile" or "--client-id"
+        import re
+        for cmd in _DANGEROUS_SUBCOMMANDS:
+            # Match "  cmd" at line start (after newline) followed by whitespace
+            if re.search(rf"\n\s+{cmd}\s+", help_text):
+                result["dangerous_commands_detected"].append(cmd)
+
+        # Determine if Guardian can enforce its restrictions
+        required_all = all(
+            flag in result["required_flags_supported"]
+            for flag in _REQUIRED_FLAGS
+        )
+        # If any required flag is missing, Guardian cannot safely execute JCode
+        if not required_all:
+            missing = sorted(_REQUIRED_FLAGS - set(result["required_flags_supported"]))
+            result["probe_error"] = (
+                f"Missing required JCode flags: {', '.join(missing)}. "
+                "Cannot safely execute JCode without these flags."
+            )
+            return result
+
+        # All required checks passed
+        result["can_enforce_restrictions"] = True
+
+    except subprocess.TimeoutExpired:
+        result["probe_error"] = f"jcode --help timed out after {timeout}s."
+    except (OSError, subprocess.SubprocessError) as error:
+        result["probe_error"] = str(error)
+
+    return result
+
+
 def jcode_status() -> dict:
     """Detect JCode binary and read version with timeout.
 
@@ -107,12 +229,25 @@ def jcode_status() -> dict:
             "restrictions": list(_JCODE_RESTRICTIONS),
         }
 
+    # Run capability probe
+    probe_result = jcode_capability_probe(executable)
+    capability = {
+        "probed": probe_result.get("probed", False),
+        "required_flags": probe_result.get("required_flags_supported", []),
+        "recommended_flags": probe_result.get("recommended_flags_supported", []),
+        "dangerous_commands": probe_result.get("dangerous_commands_detected", []),
+        "can_enforce_restrictions": probe_result.get("can_enforce_restrictions", False),
+    }
+    if probe_result.get("probe_error"):
+        capability["probe_error"] = probe_result["probe_error"]
+
     return {
         "available": True,
         "executable": executable,
         "version": version,
         "message": "JCode binary detected and version read successfully.",
         "restrictions": list(_JCODE_RESTRICTIONS),
+        "capability": capability,
     }
 
 
@@ -510,15 +645,25 @@ def execute_jcode_in_sandbox(
             "Install JCode from https://github.com/1jehuang/jcode or ensure it is on PATH."
         )
 
+    # 3. Probe capability to verify required flags are supported
+    probe = jcode_capability_probe(executable)
+    if not probe.get("can_enforce_restrictions"):
+        error = probe.get("probe_error", "Capability probe failed for unknown reason.")
+        raise GuardianError(
+            f"JCode capability check failed: {error} "
+            "Execution refused. The installed JCode version may not support "
+            "the required flags for safe integration."
+        )
+
     clean_task = task.strip()
     if not clean_task:
         raise GuardianError("A non-empty JCode task is required.")
 
-    # 3. Validate timeout
+    # 4. Validate timeout
     if timeout < 10 or timeout > 3600:
         raise GuardianError("timeout must be between 10 and 3600 seconds.")
 
-    # 4. Prepare handoff and safe paths
+    # 5. Prepare handoff and safe paths
     safe_paths = _safe_writable_paths(brain, writable_paths or [])
     handoff_data = create_jcode_handoff(brain, clean_task, safe_paths, test_command)
     handoff_path = handoff_data["handoff"]

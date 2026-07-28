@@ -31,8 +31,10 @@ class AiderAdapterTests(unittest.TestCase):
         self.assertTrue(result["available"])
         self.assertIn("ollama", result["backends"])
         self.assertIn("omniroute", result["backends"])
+        self.assertIn("colibri", result["backends"])
         self.assertIn("jcode_available", result)
         self.assertIn("hermes_available", result)
+        self.assertIn("colibri_available", result)
 
     def test_prepare_embeds_only_routed_profile_handoff(self) -> None:
         result = create_aider_handoff(self.brain, "Write unit tests", limit=3)
@@ -252,8 +254,6 @@ class AiderAdapterTests(unittest.TestCase):
             "diff_stat": "",
             "error": None,
         }
-        # The test command won't actually run because we mock _run_tests via
-        # patching _git_diff_summary only. Let's test that evidence is collected.
         evidence = collect_aider_execution_evidence(
             self.brain, "Fix bug", test_command="echo ok",
         )
@@ -273,7 +273,6 @@ class AiderAdapterTests(unittest.TestCase):
             self.brain, "Fix bug", test_command=None,
         )
         self.assertGreater(len(evidence["remaining_risks"]), 0)
-        # Should mention no test command and no files changed
         self.assertTrue(
             any("No test command" in r for r in evidence["remaining_risks"])
         )
@@ -312,11 +311,79 @@ class AiderAdapterTests(unittest.TestCase):
             "qwen2.5-coder",
             writable_paths=["src/auth", ".env", "../outside"],
         )
-        # Protected paths should be filtered out; src/auth is valid
         handoff_paths = result["handoff"]["writable_paths"]
         self.assertIn("src/auth", handoff_paths)
         for sensitive in (".env", "../outside"):
             self.assertNotIn(sensitive, handoff_paths)
+
+
+# ---------------------------------------------------------------------------
+# Colibrì backend tests
+# ---------------------------------------------------------------------------
+
+class ColibriBackendTests(unittest.TestCase):
+    """Tests for the Colibrì (coli) Aider backend."""
+
+    def test_colibri_in_backends_dict(self) -> None:
+        """Colibrì should be present in the BACKENDS dict with correct config."""
+        from guardian_agent.aider import BACKENDS
+        self.assertIn("colibri", BACKENDS)
+        config = BACKENDS["colibri"]
+        self.assertEqual(config["host"], "127.0.0.1")
+        self.assertEqual(config["port"], 8000)
+        self.assertEqual(config["base_url"], "http://localhost:8000/v1")
+        self.assertIsNone(config["credential_env"])
+        self.assertFalse(config["credential_required"])
+
+    @patch("guardian_agent.aider.shutil.which", return_value="/usr/bin/coli")
+    def test_colibri_path_detected(self, _which) -> None:
+        """_colibri_path should return the coli binary path when installed."""
+        from guardian_agent.aider import _colibri_path
+        self.assertEqual(_colibri_path(), "/usr/bin/coli")
+
+    @patch("guardian_agent.aider.shutil.which", return_value=None)
+    def test_colibri_path_not_found(self, _which) -> None:
+        """_colibri_path should return None when coli is not installed."""
+        from guardian_agent.aider import _colibri_path
+        self.assertIsNone(_colibri_path())
+
+    @patch("guardian_agent.aider.shutil.which", return_value="/usr/bin/coli")
+    def test_colibri_available_true(self, _which) -> None:
+        """_colibri_available should return True when coli binary is on PATH."""
+        from guardian_agent.aider import _colibri_available
+        self.assertTrue(_colibri_available())
+
+    @patch("guardian_agent.aider.shutil.which", return_value=None)
+    def test_colibri_available_false(self, _which) -> None:
+        """_colibri_available should return False when coli binary is missing."""
+        from guardian_agent.aider import _colibri_available
+        self.assertFalse(_colibri_available())
+
+    @patch("guardian_agent.aider._aider_path", return_value="/usr/bin/aider")
+    @patch("guardian_agent.aider.subprocess.run")
+    def test_status_includes_colibri(self, run, _path) -> None:
+        """aider_status should include colibri in backends and colibri_available."""
+        run.return_value.stdout = "aider 0.86.2\n"
+        with patch("guardian_agent.aider._port_open", return_value=True):
+            with patch("guardian_agent.aider._colibri_available", return_value=True):
+                result = aider_status()
+        self.assertIn("colibri", result["backends"])
+        self.assertTrue(result["colibri_available"])
+        colibri_config = result["backends"]["colibri"]
+        self.assertEqual(colibri_config["base_url"], "http://localhost:8000/v1")
+        self.assertTrue(colibri_config["reachable"])
+        self.assertTrue(colibri_config["credential_available"])  # No cred needed
+
+    def test_colibri_status_not_installed(self) -> None:
+        """When coli is not installed and colibri server is not running, status
+        should show colibri as reachable=false but still in backends."""
+        with patch("guardian_agent.aider._port_open", return_value=False):
+            with patch("guardian_agent.aider._colibri_available", return_value=False):
+                with patch("guardian_agent.aider._aider_path", return_value=None):
+                    result = aider_status()
+        self.assertIn("colibri", result["backends"])
+        self.assertFalse(result["backends"]["colibri"]["reachable"])
+        self.assertFalse(result["colibri_available"])
 
 
 if __name__ == "__main__":

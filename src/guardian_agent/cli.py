@@ -158,6 +158,11 @@ from guardian_agent.hermes import (
     list_hermes_memory,
 )
 
+from guardian_agent.worker_router import (
+    execute_route,
+    route_task,
+)
+
 from guardian_agent.orchestration import (
     orchestrate_confirm,
     orchestrate_dispatch,
@@ -627,6 +632,28 @@ def build_parser() -> argparse.ArgumentParser:
     hermes_run_due.add_argument("--project", default=".", type=_project_path)
     hermes_run_due.add_argument("--max-tasks", type=int, default=5)
     hermes_run_due.add_argument("--force", action="store_true", help="Run all enabled tasks regardless of schedule")
+
+    # WorkerRouter (Phase 7)
+    route_p = subparsers.add_parser("route", help="Auto-select the best worker (Aider/JCode/Hermes) for a confirmed task")
+    route_sub = route_p.add_subparsers(dest="route_command", required=True)
+    route_analyze = route_sub.add_parser("analyze", help="Classify, select worker, and prepare handoff (no execution)")
+    route_analyze.add_argument("--project", default=".", type=_project_path)
+    route_analyze.add_argument("--task", required=True)
+    route_analyze.add_argument("--writable-path", action="append", default=[], help="Writable path for coding workers (repeatable)")
+    route_analyze.add_argument("--test-command", help="Test command for verification")
+    route_analyze.add_argument("--backend", choices=["ollama", "omniroute", "colibri"], default="ollama", help="Aider backend")
+    route_analyze.add_argument("--model", help="Aider model (default: qwen2.5-coder)")
+
+    route_execute = route_sub.add_parser("execute", help="Execute a previously routed task on its selected worker")
+    route_execute.add_argument("--project", default=".", type=_project_path)
+    route_execute.add_argument("--task", required=True)
+    route_execute.add_argument("--writable-path", action="append", default=[], help="Writable path (repeatable)")
+    route_execute.add_argument("--test-command", help="Test command")
+    route_execute.add_argument("--backend", choices=["ollama", "omniroute", "colibri"], default="ollama", help="Aider backend")
+    route_execute.add_argument("--model", default="qwen2.5-coder", help="Aider model")
+    route_execute.add_argument("--timeout", type=int, default=300, help="Worker timeout in seconds")
+    route_execute.add_argument("--allow-edits", action="store_true", default=False, help="Allow file edits (default: dry-run only)")
+
     jcode_command = jcode_sub.add_parser("command", help="Preview the safe JCode command without executing it")
     jcode_command.add_argument("--project", default=".", type=_project_path)
     jcode_command.add_argument("--task", required=True)
@@ -668,7 +695,7 @@ def build_parser() -> argparse.ArgumentParser:
     aider_command = aider_sub.add_parser("command", help="Preview the bounded Aider command")
     aider_command.add_argument("--project", default=".", type=_project_path)
     aider_command.add_argument("--task", required=True)
-    aider_command.add_argument("--backend", choices=["ollama", "omniroute"], required=True)
+    aider_command.add_argument("--backend", choices=["ollama", "omniroute", "colibri"], required=True)
     aider_command.add_argument("--model", required=True)
     aider_command.add_argument("--limit", type=int, default=5)
     aider_command.add_argument("--allow-edits", action="store_true")
@@ -680,7 +707,7 @@ def build_parser() -> argparse.ArgumentParser:
     aider_start = aider_sub.add_parser("start", help="Launch Aider; dry-run is the default")
     aider_start.add_argument("--project", default=".", type=_project_path)
     aider_start.add_argument("--task", required=True)
-    aider_start.add_argument("--backend", choices=["ollama", "omniroute"], required=True)
+    aider_start.add_argument("--backend", choices=["ollama", "omniroute", "colibri"], required=True)
     aider_start.add_argument("--model", required=True)
     aider_start.add_argument("--limit", type=int, default=5)
     aider_start.add_argument("--allow-edits", action="store_true")
@@ -1610,68 +1637,6 @@ def main(argv: list[str] | None = None) -> int:
                 if len(args.tasks) < 1 or len(args.tasks) > 2:
                     print(json.dumps({"error": "Provide 1-2 tasks for parallel execution."}, indent=2))
                     return 1
-            if args.command == "hermes":
-                if args.hermes_command == "status":
-                    print(json.dumps(hermes_status(), indent=2))
-                    return 0
-                if args.hermes_command == "opt-in":
-                    result = hermes_opt_in(brain)
-                    print(json.dumps(result, indent=2))
-                    return 0
-                if args.hermes_command == "prepare":
-                    result = create_hermes_handoff(
-                        brain, args.task,
-                        task_type=args.task_type,
-                        read_paths=args.read_path or None,
-                    )
-                    print(json.dumps(result, indent=2))
-                    return 0
-                if args.hermes_command == "run":
-                    result = execute_hermes_task(
-                        brain, args.task,
-                        task_type=args.task_type,
-                        timeout=args.timeout,
-                    )
-                    print(json.dumps(result, indent=2))
-                    return 0
-                if args.hermes_command == "memory":
-                    result = list_hermes_memory(brain)
-                    print(json.dumps(result, indent=2))
-                    return 0
-                if args.hermes_command == "import-lesson":
-                    result = import_hermes_lesson(
-                        brain, args.source,
-                        sanitized_pattern=args.pattern,
-                        sanitized_prevention=args.prevention,
-                        tags=args.tags,
-                    )
-                    print(json.dumps(result, indent=2))
-                    return 0
-                if args.hermes_command == "schedule":
-                    result = hermes_schedule_task(
-                        brain, args.task_type, args.description,
-                        interval_seconds=args.interval,
-                        approval_id=args.approval_id,
-                    )
-                    print(json.dumps(result, indent=2))
-                    return 0
-                if args.hermes_command == "list-scheduled":
-                    result = hermes_list_scheduled(brain)
-                    print(json.dumps(result, indent=2))
-                    return 0
-                if args.hermes_command == "unschedule":
-                    result = hermes_unschedule_task(brain, args.task_id)
-                    print(json.dumps(result, indent=2))
-                    return 0
-                if args.hermes_command == "run-due":
-                    result = hermes_run_due_tasks(
-                        brain,
-                        max_tasks=args.max_tasks,
-                        force=args.force,
-                    )
-                    print(json.dumps(result, indent=2))
-                    return 0
-
                 task_packages = []
                 for t in args.tasks:
                     task_packages.append({
@@ -1685,6 +1650,99 @@ def main(argv: list[str] | None = None) -> int:
                     global_timeout=args.global_timeout,
                 )
                 print(json.dumps(result, indent=2, default=str))
+                return 0
+            return 0
+
+        if args.command == "hermes":
+            if args.hermes_command == "status":
+                print(json.dumps(hermes_status(), indent=2))
+                return 0
+            if args.hermes_command == "opt-in":
+                result = hermes_opt_in(brain)
+                print(json.dumps(result, indent=2))
+                return 0
+            if args.hermes_command == "prepare":
+                result = create_hermes_handoff(
+                    brain, args.task,
+                    task_type=args.task_type,
+                    read_paths=args.read_path or None,
+                )
+                print(json.dumps(result, indent=2))
+                return 0
+            if args.hermes_command == "run":
+                result = execute_hermes_task(
+                    brain, args.task,
+                    task_type=args.task_type,
+                    timeout=args.timeout,
+                )
+                print(json.dumps(result, indent=2))
+                return 0
+            if args.hermes_command == "memory":
+                result = list_hermes_memory(brain)
+                print(json.dumps(result, indent=2))
+                return 0
+            if args.hermes_command == "import-lesson":
+                result = import_hermes_lesson(
+                    brain, args.source,
+                    sanitized_pattern=args.pattern,
+                    sanitized_prevention=args.prevention,
+                    tags=args.tags,
+                )
+                print(json.dumps(result, indent=2))
+                return 0
+            if args.hermes_command == "schedule":
+                result = hermes_schedule_task(
+                    brain, args.task_type, args.description,
+                    interval_seconds=args.interval,
+                    approval_id=args.approval_id,
+                )
+                print(json.dumps(result, indent=2))
+                return 0
+            if args.hermes_command == "list-scheduled":
+                result = hermes_list_scheduled(brain)
+                print(json.dumps(result, indent=2))
+                return 0
+            if args.hermes_command == "unschedule":
+                result = hermes_unschedule_task(brain, args.task_id)
+                print(json.dumps(result, indent=2))
+                return 0
+            if args.hermes_command == "run-due":
+                result = hermes_run_due_tasks(
+                    brain,
+                    max_tasks=args.max_tasks,
+                    force=args.force,
+                )
+                print(json.dumps(result, indent=2))
+                return 0
+            return 0
+
+        if args.command == "route":
+            if args.route_command == "analyze":
+                result = route_task(
+                    brain, args.task,
+                    writable_paths=args.writable_path or None,
+                    test_command=args.test_command,
+                    backend=args.backend,
+                    model=args.model,
+                )
+                print(json.dumps(result, indent=2, default=str))
+                return 0
+            if args.route_command == "execute":
+                result = route_task(
+                    brain, args.task,
+                    writable_paths=args.writable_path or None,
+                    test_command=args.test_command,
+                    backend=args.backend,
+                    model=args.model,
+                )
+                exec_result = execute_route(
+                    brain, result,
+                    backend=args.backend,
+                    model=args.model,
+                    timeout=args.timeout,
+                    dry_run=not args.allow_edits,
+                )
+                print(json.dumps(exec_result, indent=2, default=str))
                 return 0
             return 0
 

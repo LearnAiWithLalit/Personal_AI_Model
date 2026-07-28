@@ -37,6 +37,13 @@ BACKENDS = {
         "credential_env": "OMNIROUTE_API_KEY",
         "credential_required": False,
     },
+    "colibri": {
+        "base_url": "http://localhost:8000/v1",
+        "host": "127.0.0.1",
+        "port": 8000,
+        "credential_env": None,
+        "credential_required": False,
+    },
 }
 
 # Patterns that indicate a task likely requires multi-file changes (large task)
@@ -71,6 +78,15 @@ def _aider_path() -> str | None:
     return shutil.which("aider", path=search_path)
 
 
+def _colibri_path() -> str | None:
+    """Locate the Colibrì binary (coli) on PATH.
+
+    Colibrì provides an OpenAI-compatible HTTP API server via `coli serve`.
+    Aider connects to it as a backend to run large local MoE models.
+    """
+    return shutil.which("coli")
+
+
 def _port_open(host: str, port: int) -> bool:
     try:
         with socket.create_connection((host, port), timeout=0.5):
@@ -87,6 +103,11 @@ def _jcode_available() -> bool:
 def _hermes_available() -> bool:
     """Detect whether Hermes binary is available (for research routing)."""
     return bool(shutil.which("hermes"))
+
+
+def _colibri_available() -> bool:
+    """Detect whether Colibrì binary (coli) is available (for backend routing)."""
+    return bool(shutil.which("coli"))
 
 
 def _git_diff_summary(project_root: Path) -> dict:
@@ -326,6 +347,7 @@ def aider_status() -> dict:
         },
         "jcode_available": _jcode_available(),
         "hermes_available": _hermes_available(),
+        "colibri_available": _colibri_available(),
     }
     if executable:
         try:
@@ -581,7 +603,7 @@ def build_aider_command(
     Args:
         brain: The project brain.
         task: The confirmed task description.
-        backend: One of "ollama" or "omniroute".
+        backend: One of "ollama", "omniroute", or "colibri".
         model: The model identifier (must pass model policy).
         dry_run: If True, adds --dry-run to the Aider command.
         limit: Max profiles for the handoff.
@@ -673,7 +695,7 @@ def launch_aider(
     Args:
         brain: The project brain.
         task: The confirmed task description.
-        backend: One of "ollama" or "omniroute".
+        backend: One of "ollama", "omniroute", or "colibri".
         model: The model identifier.
         dry_run: If True, runs in --dry-run mode (default safe behavior).
         limit: Max profiles for the handoff.

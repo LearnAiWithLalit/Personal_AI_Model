@@ -15,6 +15,128 @@ from guardian_agent.jcode import (
 )
 
 
+class JCodeCapabilityProbeTests(unittest.TestCase):
+    """Tests for JCode capability probing (flag detection, dangerous commands)."""
+
+    @patch("guardian_agent.jcode._timeout_version", return_value="jcode 0.5.0")
+    @patch("guardian_agent.jcode.subprocess.run")
+    def test_all_required_flags_detected(self, mock_run, _version) -> None:
+        """Probe should detect all required flags in --help output."""
+        mock_run.return_value.stdout = (
+            "Usage: jcode [OPTIONS] [COMMAND]\n"
+            "\n"
+            "Options:\n"
+            "  --read <PATH>        Read context from file\n"
+            "  --write <PATHS>      Writable file paths (comma-separated)\n"
+            "  --message <TEXT>     Task description\n"
+            "  --test <CMD>         Test command to run\n"
+            "  --dry-run            Preview without making changes\n"
+            "  --model <MODEL>      Model identifier\n"
+            "  --provider-profile <NAME>  Provider profile name\n"
+            "\n"
+            "Commands:\n"
+            "  run                  Run a task\n"
+        )
+        mock_run.return_value.stderr = ""
+        mock_run.return_value.returncode = 0
+
+        from guardian_agent.jcode import jcode_capability_probe
+        result = jcode_capability_probe("/usr/bin/jcode")
+
+        self.assertTrue(result["probed"])
+        self.assertTrue(result["can_enforce_restrictions"])
+        self.assertIn("--read", result["required_flags_supported"])
+        self.assertIn("--message", result["required_flags_supported"])
+        self.assertIn("--dry-run", result["required_flags_supported"])
+        self.assertIn("--write", result["recommended_flags_supported"])
+        self.assertIn("--test", result["recommended_flags_supported"])
+
+    @patch("guardian_agent.jcode._timeout_version", return_value="jcode 0.5.0")
+    @patch("guardian_agent.jcode.subprocess.run")
+    def test_dangerous_commands_detected(self, mock_run, _version) -> None:
+        """Probe should detect dangerous subcommands."""
+        mock_run.return_value.stdout = (
+            "Usage: jcode [OPTIONS] [COMMAND]\n"
+            "\n"
+            "Options:\n"
+            "  --read <PATH>        Read context\n"
+            "  --message <TEXT>     Task description\n"
+            "  --dry-run            Preview mode\n"
+            "\n"
+            "Commands:\n"
+            "  run                  Run a task\n"
+            "  login                Authenticate with a provider\n"
+            "  provider             Manage provider profiles\n"
+            "  server               Start persistent server\n"
+            "  swarm                Spawn collaborative agents\n"
+        )
+        mock_run.return_value.stderr = ""
+        mock_run.return_value.returncode = 0
+
+        from guardian_agent.jcode import jcode_capability_probe
+        result = jcode_capability_probe("/usr/bin/jcode")
+
+        self.assertTrue(result["probed"])
+        self.assertIn("login", result["dangerous_commands_detected"])
+        self.assertIn("provider", result["dangerous_commands_detected"])
+        self.assertIn("server", result["dangerous_commands_detected"])
+        self.assertIn("swarm", result["dangerous_commands_detected"])
+
+    @patch("guardian_agent.jcode._timeout_version", return_value="jcode 0.5.0")
+    @patch("guardian_agent.jcode.subprocess.run")
+    def test_missing_required_flag_refuses_execution(self, mock_run, _version) -> None:
+        """Missing required flag should set can_enforce_restrictions=False."""
+        # --dry-run is missing from help output
+        mock_run.return_value.stdout = (
+            "Usage: jcode [OPTIONS] [COMMAND]\n"
+            "\n"
+            "Options:\n"
+            "  --read <PATH>        Read context\n"
+            "  --message <TEXT>     Task description\n"
+        )
+        mock_run.return_value.stderr = ""
+        mock_run.return_value.returncode = 0
+
+        from guardian_agent.jcode import jcode_capability_probe
+        result = jcode_capability_probe("/usr/bin/jcode")
+
+        self.assertFalse(result["can_enforce_restrictions"])
+        self.assertIsNotNone(result["probe_error"])
+        self.assertIn("--dry-run", result["probe_error"])
+
+    @patch("guardian_agent.jcode.subprocess.run")
+    def test_timeout_during_probe(self, mock_run) -> None:
+        """Timeout during --help should produce probe_error."""
+        mock_run.side_effect = TimeoutError("timed out")
+
+        from guardian_agent.jcode import jcode_capability_probe
+        result = jcode_capability_probe("/usr/bin/jcode")
+
+        self.assertFalse(result["probed"])
+        self.assertFalse(result["can_enforce_restrictions"])
+        self.assertIsNotNone(result["probe_error"])
+
+    @patch("guardian_agent.jcode._timeout_version", return_value=None)
+    @patch("guardian_agent.jcode.subprocess.run")
+    def test_probe_version_unavailable(self, mock_run, _version) -> None:
+        """When version check fails, probe should still attempt help."""
+        mock_run.return_value.stdout = (
+            "Usage: jcode [OPTIONS] [COMMAND]\n"
+            "  --read <PATH>        Read context\n"
+            "  --message <TEXT>     Task description\n"
+            "  --dry-run            Preview mode\n"
+        )
+        mock_run.return_value.stderr = ""
+        mock_run.return_value.returncode = 0
+
+        from guardian_agent.jcode import jcode_capability_probe
+        result = jcode_capability_probe("/usr/bin/jcode")
+
+        self.assertTrue(result["probed"])
+        self.assertIsNone(result["version"])
+        self.assertTrue(result["can_enforce_restrictions"])
+
+
 class JCodeStatusTests(unittest.TestCase):
     """Tests for binary detection, version, and timeout handling."""
 
@@ -27,11 +149,23 @@ class JCodeStatusTests(unittest.TestCase):
         self.assertIsNone(result["version"])
         self.assertIn("not found", result["message"].lower())
 
+    @patch("guardian_agent.jcode._timeout_version", return_value="jcode 0.1.0")
     @patch("guardian_agent.jcode._jcode_path", return_value="/usr/bin/jcode")
     @patch("guardian_agent.jcode.subprocess.run")
-    def test_version_read_with_timeout(self, run, _path) -> None:
-        """Version is read successfully when binary responds."""
-        run.return_value.stdout = "jcode 0.1.0\n"
+    def test_version_read_with_timeout(self, run, _path, _version) -> None:
+        """Version is read successfully when binary responds.
+
+        Mocks _timeout_version to return a known version string.
+        Mocks subprocess.run for the probe's --help invocation with
+        output containing all required flags.
+        """
+        run.return_value.stdout = (
+            "Usage: jcode [OPTIONS] [COMMAND]\n"
+            "  --read <PATH>        Read context\n"
+            "  --message <TEXT>     Task description\n"
+            "  --dry-run            Preview mode\n"
+        )
+        run.return_value.stderr = ""
         run.return_value.returncode = 0
         result = jcode_status()
         self.assertTrue(result["available"])
@@ -263,13 +397,23 @@ class JCodeSandboxExecutionTests(unittest.TestCase):
         with self.assertRaises(GuardianError):
             execute_jcode_in_sandbox(self.brain, "Fix bug")
 
+    @patch("guardian_agent.jcode.jcode_capability_probe")
     @patch("guardian_agent.jcode._jcode_path", return_value="/usr/bin/jcode")
     @patch("guardian_agent.jcode.subprocess.run")
     @patch("guardian_agent.sandbox.create_worktree_sandbox")
     def test_execution_captures_stdout_stderr(
-        self, mock_sandbox, mock_run, _path
+        self, mock_sandbox, mock_run, _path, _probe
     ) -> None:
         """Sandbox execution should capture stdout and stderr."""
+        _probe.return_value = {
+            "probed": True,
+            "version": "jcode 0.1.0",
+            "required_flags_supported": ["--read", "--message", "--dry-run"],
+            "recommended_flags_supported": [],
+            "dangerous_commands_detected": [],
+            "can_enforce_restrictions": True,
+            "probe_error": None,
+        }
         mock_sandbox.return_value = {
             "branch": "jcode-test",
             "worktree_path": str(self.brain.root / ".." / "sandbox"),
@@ -290,13 +434,23 @@ class JCodeSandboxExecutionTests(unittest.TestCase):
         self.assertIn("sandbox_path", result)
         self.assertIn("changed_files", result)
 
+    @patch("guardian_agent.jcode.jcode_capability_probe")
     @patch("guardian_agent.jcode._jcode_path", return_value="/usr/bin/jcode")
     @patch("guardian_agent.jcode.subprocess.run")
     @patch("guardian_agent.sandbox.create_worktree_sandbox")
     def test_timeout_reported_gracefully(
-        self, mock_sandbox, mock_run, _path
+        self, mock_sandbox, mock_run, _path, _probe
     ) -> None:
         """Execution timeout should be reported gracefully."""
+        _probe.return_value = {
+            "probed": True,
+            "version": "jcode 0.1.0",
+            "required_flags_supported": ["--read", "--message", "--dry-run"],
+            "recommended_flags_supported": [],
+            "dangerous_commands_detected": [],
+            "can_enforce_restrictions": True,
+            "probe_error": None,
+        }
         mock_sandbox.return_value = {
             "branch": "jcode-test",
             "worktree_path": str(self.brain.root / ".." / "sandbox"),
@@ -342,13 +496,23 @@ class JCodeSandboxExecutionTests(unittest.TestCase):
         out_of_scope = _validate_out_of_scope(changed, allowed)
         self.assertEqual(len(out_of_scope), 0)
 
+    @patch("guardian_agent.jcode.jcode_capability_probe")
     @patch("guardian_agent.jcode._jcode_path", return_value="/usr/bin/jcode")
     @patch("guardian_agent.jcode.subprocess.run")
     @patch("guardian_agent.sandbox.create_worktree_sandbox")
     def test_result_includes_structured_output(
-        self, mock_sandbox, mock_run, _path
+        self, mock_sandbox, mock_run, _path, _probe
     ) -> None:
         """Execution result should include all required structured fields."""
+        _probe.return_value = {
+            "probed": True,
+            "version": "jcode 0.1.0",
+            "required_flags_supported": ["--read", "--message", "--dry-run"],
+            "recommended_flags_supported": [],
+            "dangerous_commands_detected": [],
+            "can_enforce_restrictions": True,
+            "probe_error": None,
+        }
         mock_sandbox.return_value = {
             "branch": "jcode-test",
             "worktree_path": str(self.brain.root / ".." / "sandbox"),

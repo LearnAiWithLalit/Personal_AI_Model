@@ -182,19 +182,27 @@ class HermesOptInTests(unittest.TestCase):
         result = hermes_opt_in(self.brain)
         self.assertEqual(result["status"], "already_opted_in")
 
-    def test_execution_blocked_without_opt_in(self) -> None:
-        """execute_hermes_task must raise if opt-in not granted."""
+    def test_execution_blocked_by_default(self) -> None:
+        """execute_hermes_task must raise 'disabled by default' error."""
         with self.assertRaises(GuardianError) as ctx:
             execute_hermes_task(self.brain, "Research auth")
-        self.assertIn("opt-in", str(ctx.exception).lower())
+        msg = str(ctx.exception).lower()
+        self.assertIn("disabled by default", msg)
+        self.assertIn("sandboxed execution backend", msg)
 
 
 # =====================================================================
-# Phase 5 — Execution
+# Phase 5 — Execution (fail-closed until sandbox backend exists)
 # =====================================================================
 
 class HermesExecutionTests(unittest.TestCase):
-    """Tests for execution, timeout, stdout/stderr capture."""
+    """Tests that Hermes execution is fail-closed by default.
+
+    execute_hermes_task() is disabled until a verified sandboxed execution
+    backend is implemented. These tests verify the fail-closed guard.
+    When the sandbox backend is added, update these tests to exercise
+    the actual execution flow.
+    """
 
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -204,82 +212,49 @@ class HermesExecutionTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
+    def _assert_fail_closed(self, **kwargs) -> None:
+        """Helper: verify execute_hermes_task raises fail-closed error."""
+        with self.assertRaises(GuardianError) as ctx:
+            execute_hermes_task(self.brain, "Research auth", **kwargs)
+        msg = str(ctx.exception).lower()
+        self.assertIn("disabled by default", msg)
+        self.assertIn("sandboxed", msg)
+
     @patch("guardian_agent.hermes._hermes_path", return_value=None)
-    def test_binary_not_found_raises(self, _path) -> None:
-        """Execution should raise if Hermes binary is missing."""
-        with self.assertRaises(GuardianError):
-            execute_hermes_task(self.brain, "Research auth")
+    def test_binary_not_found_still_fail_closed(self, _path) -> None:
+        """Fail-closed check happens before binary check."""
+        self._assert_fail_closed()
+
+    @patch("guardian_agent.hermes._hermes_path", return_value="/usr/bin/hermes")
+    @patch("guardian_agent.hermes.subprocess.run")
+    def test_execution_blocked_by_default(self, mock_run, _path) -> None:
+        """Execution is blocked even with binary found and opt-in granted."""
+        self._assert_fail_closed()
+        mock_run.assert_not_called()
 
     @patch("guardian_agent.hermes._hermes_path", return_value="/usr/bin/hermes")
     @patch("guardian_agent.hermes.subprocess.run")
     def test_execution_captures_stdout_stderr(self, mock_run, _path) -> None:
-        """Execution should capture stdout and stderr."""
-        mock_run.return_value.stdout = "Research findings...\nKey insight: use OAuth2."
-        mock_run.return_value.stderr = ""
-        mock_run.return_value.returncode = 0
-
-        result = execute_hermes_task(
-            self.brain, "Research auth methods",
-            task_type="research", timeout=60,
-        )
-        self.assertEqual(result["execution"]["exit_code"], 0)
-        self.assertIn("Research findings", result["execution"]["stdout"])
-        self.assertIn("memory_output", result)
-        self.assertIn("memory_path", result)
+        """Execution blocked — stdout/stderr capture not available yet."""
+        self._assert_fail_closed()
 
     @patch("guardian_agent.hermes._hermes_path", return_value="/usr/bin/hermes")
     @patch("guardian_agent.hermes.subprocess.run")
     def test_execution_saves_to_isolated_memory(self, mock_run, _path) -> None:
-        """Execution output should be saved to Hermes isolated memory."""
-        mock_run.return_value.stdout = "Planning output."
-        mock_run.return_value.stderr = ""
-        mock_run.return_value.returncode = 0
-
-        result = execute_hermes_task(
-            self.brain, "Plan implementation",
-            task_type="planning", timeout=60,
-        )
-        memory_file = Path(result["memory_output"])
-        self.assertTrue(memory_file.is_file())
-        content = memory_file.read_text(encoding="utf-8")
-        self.assertIn("Hermes Output", content)
-        self.assertIn("Planning output", content)
-        self.assertIn("Plan implementation", content)
+        """Execution blocked — memory saving not available yet."""
+        self._assert_fail_closed()
 
     @patch("guardian_agent.hermes._hermes_path", return_value="/usr/bin/hermes")
     @patch("guardian_agent.hermes.subprocess.run")
     def test_timeout_reported_gracefully(self, mock_run, _path) -> None:
-        """Execution timeout should be reported gracefully."""
-        import subprocess
-        mock_run.side_effect = subprocess.TimeoutExpired(
-            cmd="hermes", timeout=10, output="", stderr=""
-        )
-
-        result = execute_hermes_task(
-            self.brain, "Research quick",
-            task_type="research", timeout=10,
-        )
-        self.assertTrue(result["execution"]["timed_out"])
-        self.assertIn("timed out", result["execution"]["stderr"].lower())
+        """Execution blocked — timeout handling not needed yet."""
+        self._assert_fail_closed()
 
     @patch("guardian_agent.hermes._hermes_path", return_value="/usr/bin/hermes")
     @patch("guardian_agent.hermes.subprocess.run")
     def test_telemetry_disabled_by_default(self, mock_run, _path) -> None:
-        """Hermes should run with HERMES_NO_TELEMETRY=1 and TOOLS_DISABLED=1."""
-        from unittest.mock import MagicMock
-
-        def _check_env(*args, **kwargs):
-            env = kwargs.get("env", {})
-            self.assertEqual(env.get("HERMES_NO_TELEMETRY"), "1")
-            self.assertEqual(env.get("HERMES_TOOLS_DISABLED"), "1")
-            self.assertNotIn("HERMES_API_KEY", env)
-            return MagicMock(stdout="OK", stderr="", returncode=0)
-        mock_run.side_effect = _check_env
-
-        result = execute_hermes_task(
-            self.brain, "Research", task_type="research", timeout=60,
-        )
-        self.assertEqual(result["execution"]["exit_code"], 0)
+        """Execution blocked — env setup not needed yet."""
+        self._assert_fail_closed()
 
 
 # =====================================================================
@@ -312,17 +287,20 @@ class HermesMemoryIsolationTests(unittest.TestCase):
 
     def test_import_lesson_without_source_raises(self) -> None:
         """Importing a non-existent memory file should raise GuardianError."""
+        library_path = Path(self.tempdir.name) / "learning.json"
         with self.assertRaises(GuardianError) as cm:
             import_hermes_lesson(
                 self.brain, "nonexistent.md",
                 sanitized_pattern="Use async/await for I/O",
                 sanitized_prevention="Check for blocking I/O calls in hot paths",
                 tags=["async", "performance"],
+                library_path=library_path,
             )
         self.assertIn("not found", str(cm.exception))
 
     def test_import_lesson_creates_reusable_lesson(self) -> None:
         """Importing a sanitized lesson should create a reusable lesson in the library."""
+        library_path = Path(self.tempdir.name) / "learning.json"
         from guardian_agent.hermes import _hermes_memory_path
         mem_path = _hermes_memory_path(self.brain)
         source = mem_path / "research_output.md"
@@ -333,6 +311,7 @@ class HermesMemoryIsolationTests(unittest.TestCase):
             sanitized_pattern="Use environment variables for configuration",
             sanitized_prevention="Check for hardcoded config values before deployment",
             tags=["config", "security"],
+            library_path=library_path,
         )
         self.assertEqual(result["status"], "imported")
         self.assertIn("lesson_id", result)

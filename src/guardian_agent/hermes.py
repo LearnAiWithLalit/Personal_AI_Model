@@ -479,14 +479,31 @@ def execute_hermes_task(
     Raises:
         GuardianError: If opt-in not granted, binary not found, or execution fails.
     """
-    # 1. Verify explicit user opt-in
+    # 1. Fail-closed: execution is disabled until a verified sandboxed
+    #    execution backend exists. Environment variables alone cannot
+    #    guarantee Hermes cannot use tools, configure gateways, access
+    #    credentials, or write files. See:
+    #    https://github.com/NousResearch/Hermes
+    raise GuardianError(
+        "Hermes execution is disabled by default. The current adapter sets "
+        "environment variables (HERMES_TOOLS_DISABLED) but does not have "
+        "a verified sandboxed execution backend. Environment variables "
+        "alone cannot guarantee Hermes cannot use tools, configure "
+        "gateways, MCP, messaging, OAuth, or write files. A sandboxed "
+        "execution backend (worktree, restricted environment, no vault/"
+        ".env/credentials/browser/MCP/messaging configuration, post-run "
+        "diff validation, fail-closed capability verification) must be "
+        "implemented before enabling guardian hermes run."
+    )
+
+    # 2. Verify explicit user opt-in (kept for when execution is re-enabled)
     if not hermes_is_opted_in(brain):
         raise GuardianError(
             "Hermes execution requires explicit user opt-in. "
             "Run 'guardian hermes opt-in' first."
         )
 
-    # 2. Find Hermes binary
+    # 3. Find Hermes binary
     executable = _hermes_path()
     if not executable:
         raise GuardianError(

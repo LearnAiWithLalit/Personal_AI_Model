@@ -293,13 +293,19 @@ Latest verification was run after Phase 4 Hardening and Phase 5A Control Plane C
 Phase 4 & 5A Hardening suite: 8 tests passed
 Focused execution suite: 37 tests passed
 Ticket executor worker suite: 10 tests passed
-Supervisor suite: 20 tests passed
+Supervisor suite: 39 tests passed  (incl. DrainCoordinator)
 Local service & backup suite: 23 tests passed
 Bootstrap harness suite: 3 tests passed
 IDE adapter hardened suite: 24 tests passed
-Phase 5 security, account & connector suite: 20 tests passed  (URL security: 10, Accounts: 7, Connectors: 3)
+Phase 5 security, account & connector suite: 20 tests passed
 Runtime multi-process suite: 7 tests passed
-Complete repository suite: 288 tests passed
+Aider worker adapter suite: 31 tests passed
+JCode worker adapter suite: 52 tests passed
+Hermes worker adapter suite: 35 tests passed
+WorkerRouter suite: 20 tests passed
+CLI integration suite: 8 tests passed
+End-to-end smoke tests: 11 tests passed
+Complete repository suite: 548 tests passed
 Python compileall: passed
 git diff --check: passed
 ```
@@ -406,7 +412,7 @@ The following system core is present and fully verified:
 - citations, learning library, maintenance, worktrees, MCP, browser action
   foundations, and LLM Council deliberation protocol.
 
-“Implemented status” means core functionality is built and backed by 239 passing tests, though full multi-user production deployment remains to be packaged.
+“Implemented status” means core functionality is built and backed by 548 passing tests, though full multi-user production deployment remains to be packaged.
 
 ## 10. Known gaps and risks
 
@@ -548,4 +554,4 @@ Phases 2-4 have foundations implemented and hardened:
 3. **Phase 3 Installable Local Service & Backup:** completed locally with daemon lifecycle control, isolated per-project units, enablement, dynamic heartbeat TTL tracking (`interval * 2.5`), bounded history, indefinite loop, safe systemd/launchd path handling, schema v2 migration and rollback, crash/restart recovery coverage, verified-result progression to final review, backup overwrite protection, and transactional restore rollback.
 4. **Phase 4 Cross-Tool Harness & Root Bootstraps:** `bootstrap.py` enhanced with root harness generation (`--root`) for 6 target IDE environments.
 
-Fresh evidence: 243 total unit tests passing, compileall clean, `git diff --check` clean.
+Fresh evidence: 548 total unit tests passing, compileall clean, `git diff --check` clean.
