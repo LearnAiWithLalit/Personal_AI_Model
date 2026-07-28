@@ -103,6 +103,73 @@ Guardian Agent was engineered across 8 focused development phases, each adding s
 
 ---
 
+## 🛠️ Skill Ecosystem & Detailed Use Cases
+
+Guardian Agent includes a three-tier skill system designed to guide tasks safely through adaptive workflows, specialized domain roles, and custom skill generation:
+
+### 1. Built-in Core Workflow Skills
+
+Packaged inside `src/guardian_agent/builtin_skills/` and auto-selected via `guardian skill select --task "<task>"`:
+
+1. **`guardian-brainstorm`**:
+   - **Use Case**: Ambiguous requests, major feature design, architecture refactoring.
+   - **Action**: Explores requirements, presents 2–3 trade-off approaches, and asks clarifying questions before coding.
+2. **`guardian-debug`**:
+   - **Use Case**: Diagnosing bugs, failing tests, memory leaks, or integration failures.
+   - **Action**: Evidence-backed root cause analysis; states falsifiable hypothesis; adds failing regression test before fixing.
+3. **`guardian-plan`**:
+   - **Use Case**: Multi-file refactoring, database migrations, or subagent work delegation.
+   - **Action**: Breaks tasks into ordered, verifiable steps with exact target paths and rollback plans.
+4. **`guardian-review`**:
+   - **Use Case**: Code review before commits, pull requests, or releases.
+   - **Action**: Independent two-stage review — Stage 1 checks specification compliance; Stage 2 checks code quality and security.
+5. **`guardian-tdd`**:
+   - **Use Case**: Writing core business logic, APIs, security boundaries, or parsers.
+   - **Action**: Enforces Red-Green-Refactor test cycle with empirical command exit code proof.
+6. **`guardian-verify`**:
+   - **Use Case**: Final verification before task completion, git push, or PR creation.
+   - **Action**: Runs verification commands, inspects `git diff` for unintended edits, and reports exact exit evidence.
+7. **`guardian-worktree`**:
+   - **Use Case**: Isolated feature development without dirtying the active git branch.
+   - **Action**: Creates isolated git worktree branch, verifies baseline tests, and previews diff before merge.
+
+### 2. 150 Specialist Role Profiles
+
+Catalog of 150 domain-matched specialist profiles (`unit-test-writer`, `security-auditor`, `db-architect`, `api-designer`, etc.).
+- Auto-selected via deterministic metadata search (`guardian orchestrate select-profiles`), saving up to **98.6% of prompt tokens**.
+
+### 3. Local Skill Factory & External Skill Quarantine
+
+Generate, evaluate, and audit custom skills locally:
+
+```bash
+# Generate custom skill draft batch locally using qwen3-coder:30b
+guardian skill generate \
+  --requirement "Create API verification and test-triage workflows" \
+  --count 2 \
+  --provider-id local-ollama \
+  --model-id qwen3-coder:30b
+
+# Run static quality check on skill draft
+guardian skill evaluate-draft --name verify-api-contract
+
+# Run bounded semantic evaluation grounded in declared capabilities
+guardian skill evaluate-semantic \
+  --name verify-api-contract \
+  --provider-id local-ollama \
+  --model-id qwen3-coder:30b
+
+# Request and approve explicit policy request to promote skill to trusted
+guardian policy request --action skill_generated_promote --target verify-api-contract --reason "Reviewed workflow"
+guardian policy approve --id req-xxxxxxxx
+guardian skill promote --name verify-api-contract --approval-id req-xxxxxxxx
+
+# Re-scan imported external skills for security & file hash integrity
+guardian skill audit-external
+```
+
+---
+
 ## 💻 Local GPU Setup (`qwen3-coder:30b` on RX 7900 XTX)
 
 To configure Guardian for local GPU execution with highest coding priority (`priority=0`):
@@ -165,7 +232,20 @@ guardian execution plan --id orch-xxxxxxxx
 guardian supervisor run --interval-seconds 60 --max-cycles 1
 ```
 
-### 3. Local Coordination Service
+### 3. Skill Management & Skill Factory
+```bash
+# List all trusted, draft, and builtin skills
+guardian skill list
+guardian skill builtins
+
+# Select relevant skills for a specific task
+guardian skill select --task "Fix SQL injection vulnerability"
+
+# Evaluate built-in skill triggers
+guardian skill evaluate
+```
+
+### 4. Local Coordination Service
 ```bash
 # Generate systemd or launchd service unit
 guardian service install --interval-seconds 600
@@ -174,7 +254,7 @@ guardian service install --interval-seconds 600
 guardian service run --interval-seconds 600 --indefinite
 ```
 
-### 4. Account Vault & Subscription Connectors
+### 5. Account Vault & Subscription Connectors
 ```bash
 # Store encrypted credential in vault
 guardian vault set --key CANVA_API_KEY --value "secret_token_123"
@@ -194,7 +274,7 @@ guardian connector reconcile \
   --reason "Verified design was not created on Canva"
 ```
 
-### 5. Browser Operator & Visual Manual Takeover
+### 6. Browser Operator & Visual Manual Takeover
 ```bash
 # Test web page inspection
 guardian browser test --url https://canva.com --account-id canva_main
