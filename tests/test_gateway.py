@@ -350,7 +350,21 @@ class ModelGatewayTests(unittest.TestCase):
         )
 
     def test_local_coding_routing_selects_qwen3_coder_30b(self) -> None:
-        """Verify setup_ollama_provider registers qwen3-coder:30b and choose_model selects it for coding tasks."""
+        """Verify qwen3-coder:30b with priority=0 beats competing local models (e.g. qwen2.5-coder:14b) for coding tasks."""
+        # Add competing model qwen2.5-coder:14b at priority 6
+        add_provider(
+            self.brain,
+            provider_id="local-ollama-25",
+            kind="local",
+            model_id="qwen2.5-coder:14b",
+            capabilities=["coding", "review"],
+            cost_tier="local",
+            priority=6,
+            base_url="http://localhost:11434/v1",
+            credential_env=None,
+        )
+
+
         from guardian_agent.gateway import setup_ollama_provider
         setup = setup_ollama_provider(self.brain)
         self.assertEqual(setup["model"], "qwen3-coder:30b")
@@ -358,6 +372,7 @@ class ModelGatewayTests(unittest.TestCase):
         route = choose_model(self.brain, "coding")
         self.assertEqual(route["provider"], "local-ollama")
         self.assertEqual(route["model"], "qwen3-coder:30b")
+
 
 
 if __name__ == "__main__":

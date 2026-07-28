@@ -275,7 +275,7 @@ def setup_ollama_provider(brain: ProjectBrain, model_name: str = "qwen3-coder:30
         model_id=model_name,
         capabilities=["coding", "review", "research", "planning", "general"],
         cost_tier="local",
-        priority=1,
+        priority=0,
         base_url="http://localhost:11434/v1",
         credential_env=None,
     )
@@ -311,9 +311,13 @@ def discover_ollama_models(
         lowered = model_name.lower()
         capabilities = ["general", "research", "planning", "reasoning"]
         priority = 30 + index
-        if "coder" in lowered or "code" in lowered:
+        if "qwen3" in lowered:
+            capabilities.extend(["coding", "review", "documentation"])
+            priority = 0
+        elif "coder" in lowered or "code" in lowered:
             capabilities.extend(["coding", "review", "documentation"])
             priority = 5 + index
+
         elif "qwen" in lowered:
             capabilities.extend(["review", "documentation"])
             priority = 10 + index
