@@ -312,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
     
     provider_ollama = provider_subparsers.add_parser("setup-ollama", help="Register local Ollama provider endpoint")
     provider_ollama.add_argument("--project", default=".", type=_project_path)
-    provider_ollama.add_argument("--model", default="qwen2.5-coder")
+    provider_ollama.add_argument("--model", default="qwen3-coder:30b")
     provider_discover_ollama = provider_subparsers.add_parser(
         "discover-ollama", help="Discover and register installed local Ollama models"
     )
@@ -642,7 +642,7 @@ def build_parser() -> argparse.ArgumentParser:
     route_analyze.add_argument("--writable-path", action="append", default=[], help="Writable path for coding workers (repeatable)")
     route_analyze.add_argument("--test-command", help="Test command for verification")
     route_analyze.add_argument("--backend", choices=["ollama", "omniroute", "colibri"], default="ollama", help="Aider backend")
-    route_analyze.add_argument("--model", help="Aider model (default: qwen2.5-coder)")
+    route_analyze.add_argument("--model", help="Aider model (default: qwen3-coder:30b)")
 
     route_execute = route_sub.add_parser("execute", help="Execute a previously routed task on its selected worker")
     route_execute.add_argument("--project", default=".", type=_project_path)
@@ -650,7 +650,8 @@ def build_parser() -> argparse.ArgumentParser:
     route_execute.add_argument("--writable-path", action="append", default=[], help="Writable path (repeatable)")
     route_execute.add_argument("--test-command", help="Test command")
     route_execute.add_argument("--backend", choices=["ollama", "omniroute", "colibri"], default="ollama", help="Aider backend")
-    route_execute.add_argument("--model", default="qwen2.5-coder", help="Aider model")
+    route_execute.add_argument("--model", default="qwen3-coder:30b", help="Aider model")
+
     route_execute.add_argument("--timeout", type=int, default=300, help="Worker timeout in seconds")
     route_execute.add_argument("--allow-edits", action="store_true", default=False, help="Allow file edits (default: dry-run only)")
 

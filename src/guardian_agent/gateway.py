@@ -266,14 +266,14 @@ def install_development_provider_seeds(brain: ProjectBrain) -> list[dict]:
 discover_free_providers = install_development_provider_seeds
 
 
-def setup_ollama_provider(brain: ProjectBrain, model_name: str = "qwen2.5-coder") -> dict:
+def setup_ollama_provider(brain: ProjectBrain, model_name: str = "qwen3-coder:30b") -> dict:
     """Setup and register local Ollama provider endpoint."""
     prov = add_provider(
         brain,
         provider_id="local-ollama",
         kind="local",
         model_id=model_name,
-        capabilities=["coding", "research", "planning", "review", "general"],
+        capabilities=["coding", "review", "research", "planning", "general"],
         cost_tier="local",
         priority=1,
         base_url="http://localhost:11434/v1",
@@ -281,6 +281,7 @@ def setup_ollama_provider(brain: ProjectBrain, model_name: str = "qwen2.5-coder"
     )
     append_journey(brain, "Local Ollama Provider Configured", [f"Model: {model_name} at http://localhost:11434/v1"])
     return {"provider_id": prov.id, "model": model_name, "base_url": prov.base_url}
+
 
 
 def discover_ollama_models(

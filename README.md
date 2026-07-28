@@ -182,7 +182,7 @@ Guardian Agent supports bringing your own API keys via environment variables (`O
 guardian provider add \
   --id my-local \
   --kind local \
-  --model qwen2.5-coder \
+  --model qwen3-coder:30b \
   --capability coding \
   --cost-tier local \
   --base-url http://localhost:11434/v1
@@ -192,7 +192,8 @@ guardian provider add \
 guardian provider discover-free
 
 # Setup local Ollama provider endpoint
-guardian provider setup-ollama --model qwen2.5-coder
+guardian provider setup-ollama --model qwen3-coder:30b
+
 
 # Or discover every installed local model and infer conservative capabilities
 guardian provider discover-ollama
@@ -241,7 +242,7 @@ guardian provider budget \
 # Stream one exact route while retaining budget and usage settlement
 guardian provider test \
   --id local-ollama \
-  --model qwen2.5-coder:14b \
+  --model qwen3-coder:30b \
   --task documentation \
   --prompt "Return exactly: STREAM_OK" \
   --stream
@@ -252,7 +253,7 @@ guardian provider capacity
 # Probe model availability and headers without spending completion tokens
 guardian provider probe \
   --id local-ollama \
-  --model qwen2.5-coder:14b
+  --model qwen3-coder:30b
 
 # Run deterministic catalog/routing/policy evaluation
 guardian evaluate
@@ -260,7 +261,8 @@ guardian evaluate
 # Add three small quality checks using an installed local model
 guardian evaluate \
   --provider-id local-ollama \
-  --model-id qwen2.5:14b
+  --model-id qwen3-coder:30b
+
 
 # Compare all retained live evaluations
 guardian evaluate --history
@@ -431,13 +433,14 @@ guardian aider prepare --task "Review the authentication implementation"
 guardian aider command \
   --task "Review the authentication implementation" \
   --backend ollama \
-  --model qwen2.5-coder:14b
+  --model qwen3-coder:30b
 
 # Launch against an on-device model
 guardian aider start \
   --task "Review the authentication implementation" \
   --backend ollama \
-  --model qwen2.5-coder:14b
+  --model qwen3-coder:30b
+
 
 # Edits require an explicit flag
 guardian aider start \
@@ -503,19 +506,19 @@ guardian skill generate \
   --requirement "Create API verification and test-triage workflows" \
   --count 2 \
   --provider-id local-ollama \
-  --model-id qwen2.5:14b
+  --model-id qwen3-coder:30b
 
 guardian skill evaluate-draft --name verify-api-contract
 guardian skill evaluate-semantic \
   --name verify-api-contract \
   --provider-id local-ollama \
-  --model-id qwen2.5-coder:14b
+  --model-id qwen3-coder:30b
 
 # If semantic evaluation fails, revise from findings and retain rollback history.
 guardian skill revise-generated \
   --name verify-api-contract \
   --provider-id local-ollama \
-  --model-id qwen2.5-coder:14b \
+  --model-id qwen3-coder:30b \
   --available-capability "Read the supplied API contract and repository files"
 
 # A generated skill cannot self-promote. Request and approve it explicitly.
@@ -574,8 +577,9 @@ guardian maintenance init
 guardian maintenance add \
   --type provider-probe \
   --provider-id local-ollama \
-  --model-id qwen2.5-coder:14b \
+  --model-id qwen3-coder:30b \
   --interval-seconds 3600
+
 guardian maintenance add \
   --type citation-verify \
   --interval-seconds 86400

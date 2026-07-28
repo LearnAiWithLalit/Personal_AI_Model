@@ -428,7 +428,7 @@ def execute_route(
     else:
         # Aider
         backend_name = backend or "ollama"
-        model_name = model or "qwen2.5-coder"
+        model_name = model or "qwen3-coder:30b"
 
         if not _aider_path():
             raise GuardianError(
