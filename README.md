@@ -54,24 +54,52 @@ flowchart TD
 
 ---
 
-## ⚡ Phase 8 — FreeBuff-First & Two-Layer QA Pipeline
+## 🚀 Complete Project Architecture & Development Phases (Phases 1–8)
 
-Guardian Agent enforces a strict project-level execution and QA policy:
+Guardian Agent was engineered across 8 focused development phases, each adding specialized governance, security, or routing capabilities:
 
-### 1. Execution Priority Order
-1. **Stage 1 (Primary Implementation)**: **FreeBuff** interactive coding session (fresh bounded handoff).
-2. **Stage 2 (Fallback Implementation)**: Local Ollama **`qwen3-coder:30b`** + Aider fallback when FreeBuff is unavailable, fails, or times out.
-3. **Stage 3 (Specialist Model)**: Healthy free/free-limited OmniRoute routes.
+### Phase 1 — Gateway & Model Policy Foundation
+- **Catalog & Provider Scoring (`src/guardian_agent/gateway.py`)**: Unified model provider registry supporting `local`, `free`, `subscription`, and `paid` cost tiers with capability matching.
+- **Model Allowlist Policy (`src/guardian_agent/model_policy.py`)**: `require_model_allowed()` enforces strict allowlist checks, rejecting prohibited model aliases (e.g. `claude-sonnet-4.6`).
+- **Aider Worker Adapter (`src/guardian_agent/aider.py`)**: Bounded Aider execution with dry-run defaults, isolated history files (`.agent/audit/`), and secret redaction.
 
-### 2. Two-Layer QA Pipeline & Escalation Schema
-- **QA1 (First-Layer QA)**:
-  - Formats compact diffs, test outputs, criteria, and risks for free Gemini/Nemotron routes.
-  - Returns structured status in: `{"clear", "flagged", "uncertain", "failed_tests", "security_sensitive"}`.
-- **QA2 Escalation (Second-Layer QA)**:
-  - **`clear` QA1 Outcome**: QA2 is **skipped** (saving API tokens & latency).
-  - **Non-`clear` QA1 Outcome**: Escalates to QA2 (strong OmniRoute route like Claude 3.5 Sonnet / GPT-4o).
-- **Mandatory Final Approval**:
-  - Requires QA2 result (if escalated) plus primary model / human user green-signal before stage completion. Cannot be bypassed.
+### Phase 2 — Multi-Stage Execution Governor & Ticket Dispatch
+- **Execution Planning (`src/guardian_agent/execution.py`)**: Generates multi-stage plans (`plan_execution()`) with ordered model stages and terminal primary review.
+- **Supervisor Ticket Lifecycle (`src/guardian_agent/supervisor.py`)**: Ticket state machine (`dispatched`, `processed`, `blocked`, `ready`, `awaiting_primary_review`).
+- **Lease Timeout & Primary Review Inbox**: Stale execution leases auto-expire; processed tasks route to the primary review inbox for human verification.
+
+### Phase 3 — Local Coordination Service & Brain Persistence
+- **Daemon Service (`src/guardian_agent/service.py`)**: Systemd and launchd service generation for continuous background operation (`guardian service install/run`).
+- **Schema Migration Engine (`src/guardian_agent/migrations.py`)**: Versioned database migrations for ProjectBrain schemas.
+- **Automated Brain Backups**: Brain state tarball compression (`brain_backup_*.tar.gz`) on service initialization.
+
+### Phase 4 — Path Control Locks & Stage Access Modes
+- **Stage Path Control Locks (`src/guardian_agent/execution.py`)**: Execution stages declare `allowed_paths`. Stages with empty allowlists cannot modify repository files.
+- **Stage Access Modes**: Configurable `access_mode` (`read-only`, `workspace-write`, `full-write`) per orchestration ticket.
+- **Secondary Fallback Removal**: Removed ambiguous auto-fallbacks in favor of deterministic stage transitions.
+
+### Phase 5 — Encrypted Accounts, Vault & Subscription Connectors
+- **Account Vault (`src/guardian_agent/vault.py`)**: AES-GCM encrypted credential vault (`.agent/vault/`) with profile lock manager preventing concurrent account collision.
+- **Subscription Connectors (`src/guardian_agent/connectors.py`)**: Native connectors for **Canva**, **Adobe**, and **Lovable** subscription applications.
+- **Owner Tokens & Reconciliation**: Actions issue secret owner tokens (`otok-...`). Interrupted calls record `"unknown_outcome"` requiring explicit reconciliation (`connector reconcile`).
+
+### Phase 6 — Browser Preflight & Visual Manual Takeover
+- **Actionability Preflight (`src/guardian_agent/browser_operator.py`)**: `browser_actionability_check` verifies element visibility, enablement, and bounding boxes before executing actions.
+- **Visual Manual Takeover (`src/guardian_agent/takeover_manager.py`)**: Attaches headful Playwright browser session with non-destructive DOM banner overlay (`"Guardian Agent Manual Takeover Active"`).
+- **Session Control**: Full takeover lifecycle commands (`takeover status`, `takeover resume`, `takeover cancel`).
+
+### Phase 7 — Autonomous Worker Daemon & Concurrency
+- **Autonomous Supervisor Daemon (`src/guardian_agent/supervisor_daemon.py`)**: `supervisor_daemon_run()` runs background ticket dispatches, stale lease recoveries, and capacity re-audits.
+- **Bounded Concurrency**: `ThreadPoolExecutor(max_workers=4)` caps parallel ticket processing.
+- **Emergency Control**: Immediate kill-switch detection (`is_kill_switch_active()`) blocks execution upon safety triggers.
+
+### Phase 8 — FreeBuff-First & Two-Layer QA Pipeline
+- **FreeBuff-First Implementation (`src/guardian_agent/execution.py`)**: Stage 1 places **FreeBuff** as primary coding executor. Stage 2 falls back to local Ollama **`qwen3-coder:30b`** + Aider.
+- **Fresh Session Isolation (`src/guardian_agent/freebuff.py`)**: Automated FreeBuff session continuation is strictly prohibited (`allow_interactive_resume=False`), creating fresh bounded handoffs per task.
+- **Two-Layer QA Engine (`src/guardian_agent/qa_pipeline.py`)**:
+  - **QA1**: Gemini/Nemotron free route evaluates compact diffs, test outputs, criteria, and risks. Returns status in `{"clear", "flagged", "uncertain", "failed_tests", "security_sensitive"}`.
+  - **QA2 Escalation**: `clear` QA1 outcome skips QA2. Non-`clear` status escalates to QA2 (strong OmniRoute).
+  - **Final Approval**: Mandatory primary review / human green-light gate before completion.
 
 ---
 
@@ -137,7 +165,36 @@ guardian execution plan --id orch-xxxxxxxx
 guardian supervisor run --interval-seconds 60 --max-cycles 1
 ```
 
-### 3. Browser Operator & Visual Manual Takeover
+### 3. Local Coordination Service
+```bash
+# Generate systemd or launchd service unit
+guardian service install --interval-seconds 600
+
+# Run continuous local coordination service
+guardian service run --interval-seconds 600 --indefinite
+```
+
+### 4. Account Vault & Subscription Connectors
+```bash
+# Store encrypted credential in vault
+guardian vault set --key CANVA_API_KEY --value "secret_token_123"
+
+# Authenticate account via connector
+guardian connector auth --connector canva --account-id canva_main
+
+# List assets from subscription connector
+guardian connector list --connector canva --account-id canva_main
+
+# Reconcile interrupted or unknown connector outcome
+guardian connector reconcile \
+  --connector canva \
+  --action create_asset \
+  --idempotency-key key-xxxxxxxx \
+  --resolution cancelled \
+  --reason "Verified design was not created on Canva"
+```
+
+### 5. Browser Operator & Visual Manual Takeover
 ```bash
 # Test web page inspection
 guardian browser test --url https://canva.com --account-id canva_main
@@ -151,28 +208,11 @@ guardian browser takeover resume --account-id canva_main
 guardian browser takeover cancel --account-id canva_main
 ```
 
-### 4. Subscription Connectors & Reconciliation
-```bash
-# Authenticate account via vault
-guardian connector auth --connector canva --account-id canva_main
-
-# List creative assets
-guardian connector list --connector canva --account-id canva_main
-
-# Reconcile interrupted or stale connector operation
-guardian connector reconcile \
-  --connector canva \
-  --action create_asset \
-  --idempotency-key key-xxxxxxxx \
-  --resolution cancelled \
-  --reason "Verified design was not created on Canva"
-```
-
 ---
 
-## 🧪 Testing & Verification
+## 🧪 Testing & Verification Metrics
 
-Guardian Agent includes a comprehensive test suite covering security boundaries, idempotency, browser preflights, supervisor daemon concurrency, and Phase 8 QA routing.
+Guardian Agent contains 555 automated unit tests covering all 8 development phases:
 
 ```bash
 # Run full unit test suite (555 tests)
