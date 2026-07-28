@@ -19,12 +19,12 @@ class AgentProfileCatalogTests(unittest.TestCase):
     def test_catalog_contains_all_planned_profiles_and_domains(self) -> None:
         result = validate_catalog()
         self.assertTrue(result["valid"], result["errors"])
-        self.assertEqual(result["count"], 150)
+        self.assertEqual(result["count"], 151)
         self.assertEqual(result["domain_count"], 10)
-        self.assertEqual([profile.id for profile in CATALOG], list(range(1, 151)))
+        self.assertEqual([profile.id for profile in CATALOG], list(range(1, 152)))
 
     def test_profiles_are_unique_complete_and_model_safe(self) -> None:
-        self.assertEqual(len({profile.slug for profile in CATALOG}), 150)
+        self.assertEqual(len({profile.slug for profile in CATALOG}), 151)
         for profile in CATALOG:
             self.assertTrue(profile.input_contract)
             self.assertTrue(profile.output_contract)
@@ -33,7 +33,7 @@ class AgentProfileCatalogTests(unittest.TestCase):
 
     def test_lookup_by_id_and_slug(self) -> None:
         self.assertEqual(get_profile(1)["name"], "Intent classifier")
-        self.assertEqual(get_profile("frontend-developer")["id"], 46)
+        self.assertEqual(get_profile("frontend-developer")["id"], 47)
         with self.assertRaises(GuardianError):
             get_profile("not-a-real-profile")
 
@@ -53,9 +53,10 @@ class AgentProfileCatalogTests(unittest.TestCase):
 
     def test_selector_reports_large_context_savings(self) -> None:
         result = select_profiles("Review API security", limit=5)
-        self.assertEqual(result["catalog_count"], 150)
+        self.assertEqual(result["catalog_count"], 151)
         self.assertGreater(result["context"]["estimated_savings_percent"], 90)
         self.assertGreater(result["context"]["estimated_tokens_saved"], 0)
+
 
     def test_selector_diversifies_compound_tasks(self) -> None:
         result = select_profiles(

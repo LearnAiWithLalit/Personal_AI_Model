@@ -43,8 +43,9 @@ _DOMAINS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Dependency planner", "Model router", "Tool router", "Budget manager",
         "Context selector", "Memory retriever", "Delegation manager",
         "Parallel-work coordinator", "Conflict resolver", "Progress reporter",
-        "Human-approval gate",
+        "Human-approval gate", "Skill and token optimization advisor",
     )),
+
     ("product-ux", (
         "Product manager", "User-story writer", "Acceptance-criteria writer",
         "Feature prioritizer", "Roadmap agent", "User researcher", "Persona builder",
