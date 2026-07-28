@@ -423,7 +423,18 @@ def plan_execution(
         raise GuardianError("Execution planning failed: writable task has no explicit orchestration approved paths.")
 
 
-    # 1. Best healthy local Ollama route
+    # 1. Primary implementation: FreeBuff stage (FreeBuff-first policy for coding/refactoring/bugfix tasks)
+    if include_freebuff and stage_count < ordinary_max:
+        stages.append(ExecutionStage(
+            id=f"stage-{len(stages) + 1}",
+            executor="freebuff",
+            purpose=f"Primary interactive coding session for '{task}'",
+            selection_reason="FreeBuff-first policy: FreeBuff is primary implementation stage",
+            allowed_paths=list(normalized_paths),
+        ))
+        stage_count += 1
+
+    # 2. Fallback implementation: Best healthy local Ollama route (qwen3-coder:30b + Aider)
     all_local = [
         r for r in list_routes_for_task(brain, task_type)
         if r.get("provider") == "local-ollama"
@@ -438,22 +449,12 @@ def plan_execution(
             executor="ollama",
             provider=best.get("provider"),
             model=best.get("model"),
-            purpose=f"Primary local execution for '{task}'",
-            selection_reason="Best available local Ollama route (local-first policy)",
+            purpose=f"Fallback local execution for '{task}' (Aider + Qwen)",
+            selection_reason="Best available local Ollama fallback route (when FreeBuff is unavailable or fails)",
             allowed_paths=list(normalized_paths),
         ))
         stage_count += 1
 
-    # 2. FreeBuff stage (only for coding/review)
-    if include_freebuff and stage_count < ordinary_max:
-        stages.append(ExecutionStage(
-            id=f"stage-{len(stages) + 1}",
-            executor="freebuff",
-            purpose=f"Interactive coding session for '{task}'",
-            selection_reason="FreeBuff is available and task is coding/review",
-            allowed_paths=list(normalized_paths),
-        ))
-        stage_count += 1
 
     # 3. Up to 3 healthy free/free-limited OmniRoute routes (provider diversity)
     all_omniroute = [

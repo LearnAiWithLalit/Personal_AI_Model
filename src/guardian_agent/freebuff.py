@@ -1,8 +1,8 @@
 """Freebuff CLI adapter for token-saving interactive coding sessions.
 
-Freebuff is an interactive terminal agent, not a provider API. Guardian keeps
-the integration explicit: it creates a compact handoff file and launches or
-continues a Freebuff session only when the user runs the corresponding command.
+Freebuff is an interactive terminal agent. Guardian keeps the integration explicit:
+it creates a compact fresh handoff file for every task and launches a new Freebuff session.
+Automated session continuation is prohibited to ensure strict session isolation.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ def freebuff_status() -> dict:
 
 
 def create_freebuff_handoff(brain: ProjectBrain, task: str) -> dict:
+    """Create a fresh, isolated handoff document for a Freebuff coding task."""
     clean_task = task.strip()
     if not clean_task:
         raise GuardianError("A non-empty Freebuff task is required.")
@@ -41,7 +42,7 @@ def create_freebuff_handoff(brain: ProjectBrain, task: str) -> dict:
     handoff_dir.mkdir(exist_ok=True)
     handoff = handoff_dir / "FREEBUFF_HANDOFF.md"
     handoff.write_text(
-        "# Freebuff Coding Handoff\n\n"
+        "# Freebuff Coding Handoff (Fresh Session)\n\n"
         f"## Requested task\n\n{clean_task}\n\n"
         "## Instructions for the coding session\n\n"
         "Read the compact context below. Follow confirmed requirements, make only scoped changes, run relevant tests, and report changed files plus remaining risks. Do not expose secrets or perform external side effects.\n\n"
@@ -52,15 +53,20 @@ def create_freebuff_handoff(brain: ProjectBrain, task: str) -> dict:
     return {"task": clean_task, "handoff": str(handoff), "instruction": f"Start Freebuff in {brain.root} and ask it to read {handoff}."}
 
 
-def launch_freebuff(brain: ProjectBrain, conversation_id: str | None = None) -> int:
+def launch_freebuff(brain: ProjectBrain, conversation_id: str | None = None, allow_interactive_resume: bool = False) -> int:
+    """Launch a Freebuff session. Automated session continuation is strictly prohibited."""
+    if conversation_id and not allow_interactive_resume:
+        raise GuardianError(
+            "Security policy violation: FreeBuff session continuation is prohibited in automated routing. "
+            "Every coding task must start a fresh session."
+        )
+
     executable = _freebuff_path()
     if not executable:
         raise GuardianError("Freebuff CLI is not installed. Install it or add it to PATH before launching a session.")
     command = [executable]
-    if conversation_id:
+    if conversation_id and allow_interactive_resume:
         command.extend(["--continue", conversation_id])
     command.extend(["--cwd", str(brain.root)])
-    append_journey(brain, "Freebuff Session Launched", [f"Conversation: {conversation_id or 'new'}"])
-    # Deliberately inherit the terminal: Freebuff owns its login and interactive
-    # session, while Guardian does not collect passwords, session cookies, or keys.
+    append_journey(brain, "Freebuff Session Launched", [f"Conversation: {conversation_id if allow_interactive_resume else 'fresh_session'}"])
     return subprocess.run(command, cwd=str(brain.root), check=False).returncode

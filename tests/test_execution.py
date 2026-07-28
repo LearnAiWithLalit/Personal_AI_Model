@@ -122,14 +122,16 @@ class ExecutionTests(unittest.TestCase):
 
     # ---- local-first order ----
 
+    @patch("guardian_agent.execution.freebuff_status", return_value={"available": False})
     @patch("guardian_agent.execution.check_provider_health", return_value={"healthy": True})
     @patch("guardian_agent.execution.is_kill_switch_active", return_value=False)
-    def test_local_first_order(self, _kill, _health) -> None:
+    def test_local_first_order(self, _kill, _health, _freebuff) -> None:
         orch_id = _create_dispatched_orch(self.brain, "Refactor config", limit=2)
         plan = plan_execution(self.brain, orch_id)
         stages = plan["stages"]
         self.assertGreater(len(stages), 0)
         self.assertEqual(stages[0]["executor"], "ollama")
+
 
     # ---- coding FreeBuff placement ----
 
@@ -640,7 +642,8 @@ class ExecutionTests(unittest.TestCase):
         orch_id = _create_dispatched_orch(self.brain, "Fix typo", limit=2)
         plan = plan_execution(self.brain, orch_id)
         exec_id = plan["id"]
-        stage_id = plan["stages"][0]["id"]
+        stage = next(s for s in plan["stages"] if s.get("provider"))
+        stage_id = stage["id"]
         with self.assertRaises(GuardianError):
             claim_execution_stage(self.brain, exec_id, stage_id)
 
@@ -695,11 +698,13 @@ class ExecutionTests(unittest.TestCase):
         orch_id = _create_dispatched_orch(self.brain, "Fix typo", limit=2)
         plan = plan_execution(self.brain, orch_id)
         exec_id = plan["id"]
-        stage_id = plan["stages"][0]["id"]
+        stage = next(s for s in plan["stages"] if s.get("provider"))
+        stage_id = stage["id"]
         # Now make the provider unhealthy before claiming
         _health.return_value = {"healthy": False, "error_count": 5}
         with self.assertRaises(GuardianError):
             claim_execution_stage(self.brain, exec_id, stage_id)
+
 
     # ---- regression: skip event is recorded ----
 

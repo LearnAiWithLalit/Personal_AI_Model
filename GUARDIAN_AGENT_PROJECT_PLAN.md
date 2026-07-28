@@ -765,7 +765,7 @@ User request
 - Stay deterministic when no generation is needed.
 - Use cached project memory and reusable lessons before any model request.
 - One task gets one compact handoff; workers do not receive the full chat.
-- Reuse a live FreeBuff conversation instead of starting another session.
+- Always start a fresh FreeBuff session per task (no conversation continuation).
 - Prefer Ollama when expected quality is adequate, even if a remote route is free,
   because remote pools showed much higher prompt-token overhead.
 - Escalate from Ollama only after a concrete failure, low-confidence result,
