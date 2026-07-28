@@ -103,44 +103,44 @@ Guardian Agent was engineered across 8 focused development phases, each adding s
 
 ---
 
-## 🛠️ Skill Ecosystem & Detailed Use Cases
+## 🛠️ Skill Ecosystem & 150 Specialist Agent Profiles
 
 Guardian Agent includes a three-tier skill system designed to guide tasks safely through adaptive workflows, specialized domain roles, and custom skill generation:
 
-### 1. Built-in Core Workflow Skills
+### 1. 7 Built-in Core Workflow Skills
 
 Packaged inside `src/guardian_agent/builtin_skills/` and auto-selected via `guardian skill select --task "<task>"`:
 
-1. **`guardian-brainstorm`**:
-   - **Use Case**: Ambiguous requests, major feature design, architecture refactoring.
-   - **Action**: Explores requirements, presents 2–3 trade-off approaches, and asks clarifying questions before coding.
-2. **`guardian-debug`**:
-   - **Use Case**: Diagnosing bugs, failing tests, memory leaks, or integration failures.
-   - **Action**: Evidence-backed root cause analysis; states falsifiable hypothesis; adds failing regression test before fixing.
-3. **`guardian-plan`**:
-   - **Use Case**: Multi-file refactoring, database migrations, or subagent work delegation.
-   - **Action**: Breaks tasks into ordered, verifiable steps with exact target paths and rollback plans.
-4. **`guardian-review`**:
-   - **Use Case**: Code review before commits, pull requests, or releases.
-   - **Action**: Independent two-stage review — Stage 1 checks specification compliance; Stage 2 checks code quality and security.
-5. **`guardian-tdd`**:
-   - **Use Case**: Writing core business logic, APIs, security boundaries, or parsers.
-   - **Action**: Enforces Red-Green-Refactor test cycle with empirical command exit code proof.
-6. **`guardian-verify`**:
-   - **Use Case**: Final verification before task completion, git push, or PR creation.
-   - **Action**: Runs verification commands, inspects `git diff` for unintended edits, and reports exact exit evidence.
-7. **`guardian-worktree`**:
-   - **Use Case**: Isolated feature development without dirtying the active git branch.
-   - **Action**: Creates isolated git worktree branch, verifies baseline tests, and previews diff before merge.
+1. **`guardian-brainstorm`**: Intent, constraints, trade-off design before coding.
+2. **`guardian-debug`**: Evidence-backed root cause diagnosis & falsifiable hypotheses.
+3. **`guardian-plan`**: Ordered, verifiable implementation task decomposition.
+4. **`guardian-review`**: Independent two-stage review (Stage 1 Specification, Stage 2 Code Quality).
+5. **`guardian-tdd`**: Red-Green-Refactor test cycle with command exit code proof.
+6. **`guardian-verify`**: Fresh empirical verification before task completion or git push.
+7. **`guardian-worktree`**: Isolated git worktrees for safe experimental changes.
 
-### 2. 150 Specialist Role Profiles
+### 2. 150 Specialist Role Profiles Across 10 Domains
 
-Catalog of 150 domain-matched specialist profiles (`unit-test-writer`, `security-auditor`, `db-architect`, `api-designer`, etc.).
-- Auto-selected via deterministic metadata search (`guardian orchestrate select-profiles`), saving up to **98.6% of prompt tokens**.
+Defined in `src/guardian_agent/profiles.py` (lines 40–115). Rather than running 150 continuous daemon background agents, Guardian performs a deterministic metadata search over this compact index to select only the top 2 matching profiles per task (saving up to **98.6% of prompt tokens**):
 
-### 3. Local Skill Factory & External Skill Quarantine
+| Domain (15 Roles Each) | Specialist Agent Profiles |
+| :--- | :--- |
+| **Intake & Orchestration** | Intent classifier, Task decomposer, Requirements interviewer, Planner, Dependency planner, Model router, Tool router, Budget manager, Context selector, Memory retriever, Delegation manager, Parallel-work coordinator, Conflict resolver, Progress reporter, Human-approval gate |
+| **Product & UX** | Product manager, User-story writer, Acceptance-criteria writer, Feature prioritizer, Roadmap agent, User researcher, Persona builder, UX researcher, Information architect, UX writer, UI designer, Design-system agent, Accessibility designer, Wireframe agent, Usability-test analyst |
+| **Software Architecture** | Solution architect, Repository mapper, Codebase archaeologist, API architect, Database architect, Event-driven architect, Microservice architect, Monolith-modularization agent, Cloud architect, Integration architect, Performance architect, Security architect, Data architect, Migration architect, Technical decision-record writer |
+| **Coding** | Frontend developer, Backend developer, Full-stack developer, Mobile developer, Desktop-app developer, CLI developer, Browser-extension developer, API developer, Database developer, Python developer, JavaScript/TypeScript developer, Java/Kotlin developer, C#/.NET developer, Go developer, Rust/C/C++ developer |
+| **Specialized Engineering** | Game developer, Embedded/IoT developer, Robotics developer, Blockchain developer, Data-engineering developer, ML engineer, LLM/RAG engineer, Computer-vision engineer, Speech/audio engineer, GIS developer, ERP/CRM developer, Shopify/e-commerce developer, WordPress/CMS developer, Low-code automation developer, Legacy-code modernization agent |
+| **Quality & Debugging** | Bug triager, Root-cause investigator, Unit-test writer, Integration-test writer, End-to-end test agent, Regression-test agent, Test-data generator, QA explorer, Visual-regression tester, Load-test engineer, Reliability-test engineer, Fuzzer, Static-analysis agent, Code-review agent, PR-review response agent |
+| **DevOps & Operations** | CI/CD engineer, Docker/container engineer, Kubernetes engineer, Terraform/IaC engineer, Cloud deployment agent, Release manager, Dependency-upgrade agent, Package/security-update agent, Observability engineer, Log analyst, Incident commander, SRE agent, Cost-optimization agent, Backup/recovery agent, Environment/configuration agent |
+| **Security & Governance** | Threat-model agent, Secure-code reviewer, Vulnerability scanner, Pen-test assistant, Secrets detector, IAM/permissions reviewer, Privacy reviewer, Compliance mapper, License-compliance agent, Data-classification agent, Prompt-injection defender, MCP/tool-permission reviewer, Supply-chain security agent, Audit-evidence collector, Policy-enforcement agent |
+| **Data, Research & Knowledge** | Web researcher, Source verifier, Citation manager, Competitive-intelligence agent, Market researcher, Data analyst, SQL analyst, Spreadsheet analyst, Dashboard builder, Data-cleaning agent, Data-labeling agent, Document/PDF extractor, Knowledge-base curator, RAG index manager, Report writer |
+| **Business & Communication** | Technical writer, API-doc writer, README agent, Proposal writer, Sales-research agent, Lead-qualification agent, Customer-support agent, Email-drafting agent, Meeting-notes agent, Project-manager agent, Hiring/recruiting agent, Finance-analysis agent, Legal-contract reviewer, Marketing-content agent, Translation/localization agent |
 
-Generate, evaluate, and audit custom skills locally:
+### 3. Local Skill Factory, Drafts & Quarantine Management
+
+- **1 Generated Draft Skill**: `audit-citations-minimal-handoff` (untrusted draft requiring explicit evaluation & promotion).
+- **0 Trusted Custom Skills**: Ready for user promotion when required.
+- **1 Quarantined Imported Skill**: `performance` (isolated external skill awaiting security hash verification).
 
 ```bash
 # Generate custom skill draft batch locally using qwen3-coder:30b
